@@ -3,6 +3,154 @@ use anyhow::Result;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone)]
+struct HardwareCapabilities {
+    hwdec_available: Vec<String>,
+    has_gpu: bool,
+    performance_level: PerformanceLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PerformanceLevel {
+    High,   // Modern GPU, hardware decoding available
+    Medium, // Some acceleration available
+    Low,    // Software decoding only
+}
+
+// Detect hardware capabilities by querying mpv
+async fn detect_hardware_capabilities(mpv_cmd: &str, log_tx: Option<mpsc::UnboundedSender<String>>) -> HardwareCapabilities {
+    let send_log = |msg: &str| {
+        if let Some(ref tx) = log_tx {
+            let _ = tx.send(msg.to_string());
+        }
+    };
+    
+    let mut hwdec_available = Vec::new();
+    let mut has_gpu = false;
+    let mut performance_level = PerformanceLevel::Low;
+    
+    // Try to detect hardware decoding support
+    if let Ok(output) = TokioCommand::new(mpv_cmd)
+        .arg("--hwdec=help")
+        .output()
+        .await
+    {
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        if output_str.contains("auto") || output_str.contains("auto-safe") {
+            hwdec_available.push("auto-safe".to_string());
+        }
+        if output_str.contains("d3d11va") {
+            hwdec_available.push("d3d11va".to_string());
+            has_gpu = true;
+        }
+        if output_str.contains("nvdec") {
+            hwdec_available.push("nvdec".to_string());
+            has_gpu = true;
+        }
+        if output_str.contains("vaapi") {
+            hwdec_available.push("vaapi".to_string());
+            has_gpu = true;
+        }
+        if output_str.contains("videotoolbox") {
+            hwdec_available.push("videotoolbox".to_string());
+            has_gpu = true;
+        }
+    }
+    
+    // Determine performance level
+    if has_gpu && !hwdec_available.is_empty() {
+        performance_level = PerformanceLevel::High;
+    } else if !hwdec_available.is_empty() {
+        performance_level = PerformanceLevel::Medium;
+    }
+    
+    send_log(&format!("Detected hardware: GPU={}, HWDec={:?}, Level={:?}", 
+        has_gpu, hwdec_available, performance_level));
+    
+    HardwareCapabilities {
+        hwdec_available,
+        has_gpu,
+        performance_level,
+    }
+}
+
+// Build optimized mpv arguments based on hardware capabilities
+fn build_mpv_args(mpv_cmd: &str, caps: &HardwareCapabilities) -> String {
+    let mut args = vec![
+        mpv_cmd.to_string(),
+        "--no-terminal".to_string(),
+        "--really-quiet".to_string(),
+    ];
+    
+    // Hardware acceleration
+    if !caps.hwdec_available.is_empty() {
+        // Prefer auto-safe, then platform-specific
+        let hwdec = if caps.hwdec_available.contains(&"auto-safe".to_string()) {
+            "auto-safe"
+        } else if caps.hwdec_available.contains(&"d3d11va".to_string()) {
+            "d3d11va"
+        } else if caps.hwdec_available.contains(&"nvdec".to_string()) {
+            "nvdec"
+        } else if caps.hwdec_available.contains(&"vaapi".to_string()) {
+            "vaapi"
+        } else {
+            caps.hwdec_available.first().map(|s| s.as_str()).unwrap_or("auto")
+        };
+        args.push(format!("--hwdec={}", hwdec));
+        args.push("--hwdec-codecs=all".to_string());
+    }
+    
+    // Performance settings based on hardware level
+    match caps.performance_level {
+        PerformanceLevel::High => {
+            // High-end: Maximum quality and performance
+            args.push("--profile=gpu-hq".to_string());
+            args.push("--vo=gpu".to_string());
+            args.push("--scale=ewa_lanczossharp".to_string());
+            args.push("--cscale=ewa_lanczossharp".to_string());
+            args.push("--dscale=ewa_lanczossharp".to_string());
+            args.push("--deband=yes".to_string());
+            args.push("--dither-depth=auto".to_string());
+            args.push("--cache=yes".to_string());
+            args.push("--cache-secs=60".to_string());
+            args.push("--demuxer-readahead-secs=30".to_string());
+            args.push("--stream-buffer-size=2MiB".to_string());
+            args.push("--cache-pause=yes".to_string());
+            args.push("--vd-lavc-threads=0".to_string());
+            args.push("--vd-lavc-fast=yes".to_string());
+        },
+        PerformanceLevel::Medium => {
+            // Medium: Balanced quality and performance
+            args.push("--vo=gpu".to_string());
+            args.push("--scale=lanczos".to_string());
+            args.push("--cscale=lanczos".to_string());
+            args.push("--deband=yes".to_string());
+            args.push("--cache=yes".to_string());
+            args.push("--cache-secs=45".to_string());
+            args.push("--demuxer-readahead-secs=25".to_string());
+            args.push("--stream-buffer-size=1.5MiB".to_string());
+            args.push("--vd-lavc-threads=0".to_string());
+        },
+        PerformanceLevel::Low => {
+            // Low-end: Performance over quality
+            args.push("--vo=gpu".to_string());
+            args.push("--cache=yes".to_string());
+            args.push("--cache-secs=30".to_string());
+            args.push("--demuxer-readahead-secs=20".to_string());
+            args.push("--stream-buffer-size=1MiB".to_string());
+            args.push("--framedrop=vo".to_string());
+            args.push("--vd-lavc-threads=0".to_string());
+        },
+    }
+    
+    // Common optimizations for all levels
+    args.push("--target-prim=auto".to_string());
+    args.push("--target-trc=auto".to_string());
+    args.push("--".to_string());
+    
+    args.join(" ")
+}
+
 pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<String>>) -> Result<()> {
     // Helper function to send log messages
     let send_log = |msg: &str| {
@@ -47,12 +195,19 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
     #[cfg(not(windows))]
     let mpv_cmd = "mpv".to_string();
     
+    // Detect hardware capabilities
+    send_log("Detecting hardware capabilities...");
+    let caps = detect_hardware_capabilities(&mpv_cmd, log_tx.clone()).await;
+    
+    // Build optimized mpv command
+    let exec_cmd = build_mpv_args(&mpv_cmd, &caps);
+    send_log(&format!("Using optimized settings: {:?}", caps.performance_level));
+    
     // Format selector: prefer av01, then vp09, then anything else
     let format_selector = "bestvideo[vcodec^=av01][height<=1080]+bestaudio/best[vcodec^=av01][height<=1080]/bestvideo[vcodec^=vp09][height<=1080]+bestaudio/best[vcodec^=vp09][height<=1080]/best[height<=1080]";
     
     // Use --exec to launch mpv directly with progress output
     send_log("Fetching video stream with yt-dlp (preferring av01 > vp09 > other)...");
-    let exec_cmd = format!("{} --no-terminal --really-quiet --", mpv_cmd);
     
     let mut ytdlp = TokioCommand::new(&ytdlp_cmd)
         .arg("--format")
