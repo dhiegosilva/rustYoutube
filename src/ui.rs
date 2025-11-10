@@ -12,7 +12,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ViewMode {
@@ -46,6 +48,10 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     // Clear the screen
     terminal.clear()?;
 
+    // Channel for yt-dlp output messages
+    let (log_tx, mut log_rx) = mpsc::unbounded_channel::<String>();
+    let log_tx_arc = Arc::new(log_tx);
+
     let mut view_mode = ViewMode::MainMenu;
     let mut all_videos: Vec<Video> = Vec::new(); // Store all videos
     let mut all_shorts: Vec<Video> = Vec::new(); // Store all shorts separately
@@ -59,6 +65,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     let mut playlist_list_state = ListState::default();
     let mut channel_url = String::new();
     let mut status_message = t("status_welcome");
+    let mut log_message = String::new(); // Store yt-dlp output messages
     let mut should_quit = false;
     
     // Pagination state
@@ -94,50 +101,60 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
 
     // Initial render
     terminal.draw(|f| {
-        ui_main_menu(f, &status_message);
+        ui_main_menu(f, &status_message, &log_message);
     })?;
 
     loop {
+        // Check for log messages (non-blocking) - collect all pending messages
+        let mut log_updated = false;
+        while let Ok(msg) = log_rx.try_recv() {
+            log_message = msg;
+            log_updated = true;
+        }
+        // If multiple messages came in, keep the latest one
+
+        // Always redraw UI to show updated log messages
         terminal.draw(|f| {
             match view_mode {
                 ViewMode::MainMenu => {
-                    ui_main_menu(f, &status_message);
+                    ui_main_menu(f, &status_message, &log_message);
                 }
                 ViewMode::Subscriptions => {
-                    ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message);
+                    ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message, &log_message);
                 }
                 ViewMode::ChannelMenu => {
-                    ui_channel_menu(f, selected_channel_title.as_deref().unwrap_or("Channel"), &status_message);
+                    ui_channel_menu(f, selected_channel_title.as_deref().unwrap_or("Channel"), &status_message, &log_message);
                 }
                 ViewMode::SubscriptionVideos | ViewMode::SubscriptionShorts => {
                     let current_list = if view_mode == ViewMode::SubscriptionShorts { &all_shorts } else { &all_videos };
                     let page_videos = get_current_page_videos(current_list, current_page);
                     let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                    ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages);
+                    ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message);
                 }
                 ViewMode::SubscriptionPlaylists => {
-                    ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message);
+                    ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message, &log_message);
                 }
                 ViewMode::Playlists => {
-                    ui_playlists(f, &playlists, &mut playlist_list_state, &status_message);
+                    ui_playlists(f, &playlists, &mut playlist_list_state, &status_message, &log_message);
                 }
                 ViewMode::PlaylistVideos => {
                     let page_videos = get_current_page_videos(&all_videos, current_page);
                     let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                    ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages);
+                    ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message);
                 }
                 ViewMode::ChannelInput => {
-                    ui_input(f, &channel_url, &status_message);
+                    ui_input(f, &channel_url, &status_message, &log_message);
                 }
                 ViewMode::ChannelVideos => {
                     let page_videos = get_current_page_videos(&all_videos, current_page);
                     let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                    ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages);
+                    ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message);
                 }
             }
         })?;
 
-        if crossterm::event::poll(Duration::from_millis(250))? {
+        // Use shorter poll timeout to update UI more frequently
+        if crossterm::event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match view_mode {
@@ -150,7 +167,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     if youtube_client.is_authenticated() {
                                         view_mode = ViewMode::Subscriptions;
                                         status_message = t("status_loading_subscriptions");
-                                        terminal.draw(|f| ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message))?;
+                                        terminal.draw(|f| ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message, &log_message))?;
                                         
                                         match youtube_client.get_subscriptions().await {
                                             Ok(new_subs) => {
@@ -175,7 +192,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     if youtube_client.is_authenticated() {
                                         view_mode = ViewMode::Playlists;
                                         status_message = t("status_loading_playlists");
-                                        terminal.draw(|f| ui_playlists(f, &playlists, &mut playlist_list_state, &status_message))?;
+                                        terminal.draw(|f| ui_playlists(f, &playlists, &mut playlist_list_state, &status_message, &log_message))?;
                                         
                                         match youtube_client.get_playlists().await {
                                             Ok(new_playlists) => {
@@ -236,7 +253,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 }
                                 KeyCode::Char('r') => {
                                     status_message = t("status_refreshing");
-                                    terminal.draw(|f| ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message))?;
+                                    terminal.draw(|f| ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message, &log_message))?;
                                     
                                     match youtube_client.get_subscriptions().await {
                                         Ok(new_subs) => {
@@ -271,7 +288,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         current_page = 0;
                                         status_message = format!("Loading videos from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
                                         let empty: Vec<Video> = Vec::new();
-                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1))?;
+                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1, &log_message))?;
                                         
                                         match youtube_client.get_channel_videos_by_id(channel_id).await {
                                             Ok(new_videos) => {
@@ -297,7 +314,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         current_page = 0;
                                         status_message = format!("Loading shorts from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
                                         let empty: Vec<Video> = Vec::new();
-                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1))?;
+                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1, &log_message))?;
                                         
                                         match youtube_client.get_channel_videos_by_id(channel_id).await {
                                             Ok(new_videos) => {
@@ -321,7 +338,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     if let Some(channel_id) = &selected_channel_id {
                                         view_mode = ViewMode::SubscriptionPlaylists;
                                         status_message = format!("Loading playlists from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
-                                        terminal.draw(|f| ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message))?;
+                                        terminal.draw(|f| ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message, &log_message))?;
                                         
                                         match youtube_client.get_channel_playlists(channel_id).await {
                                             Ok(new_playlists) => {
@@ -374,7 +391,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             current_page = 0;
                                             status_message = format!("Loading videos from {}...", playlist.title);
                                             let empty: Vec<Video> = Vec::new();
-                                            terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1))?;
+                                            terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1, &log_message))?;
                                             
                                             match youtube_client.get_playlist_videos(&playlist.id).await {
                                                 Ok(new_videos) => {
@@ -398,7 +415,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 }
                                 KeyCode::Char('r') => {
                                     status_message = t("status_refreshing");
-                                    terminal.draw(|f| ui_playlists(f, &playlists, &mut playlist_list_state, &status_message))?;
+                                    terminal.draw(|f| ui_playlists(f, &playlists, &mut playlist_list_state, &status_message, &log_message))?;
                                     
                                     match youtube_client.get_playlists().await {
                                         Ok(new_playlists) => {
@@ -447,7 +464,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             current_page = 0;
                                             status_message = format!("Loading videos from {}...", playlist.title);
                                             let empty: Vec<Video> = Vec::new();
-                                            terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1))?;
+                                            terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1, &log_message))?;
                                             
                                             match youtube_client.get_playlist_videos(&playlist.id).await {
                                                 Ok(new_videos) => {
@@ -471,7 +488,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 }
                                 KeyCode::Char('r') => {
                                     status_message = t("status_refreshing");
-                                    terminal.draw(|f| ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message))?;
+                                    terminal.draw(|f| ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message, &log_message))?;
                                     
                                     if let Some(channel_id) = &selected_channel_id {
                                         match youtube_client.get_channel_playlists(channel_id).await {
@@ -581,13 +598,15 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 status_message = t_with_args("status_playing", &[("title", &video.title)]);
                                                 let page_videos = get_current_page_videos(current_list, current_page);
                                                 let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                                                terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages))?;
+                                                terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
                                                 
                                                 // Play video in background
                                                 let video_id = video.id.clone();
+                                                let video_title = video.title.clone();
+                                                let log_tx = log_tx_arc.clone();
                                                 tokio::spawn(async move {
-                                                    if let Err(e) = play_video(&video_id).await {
-                                                        eprintln!("Error playing video: {}", e);
+                                                    if let Err(e) = play_video(&video_id, Some((*log_tx).clone())).await {
+                                                        let _ = (*log_tx).send(format!("Error: {}", e));
                                                     }
                                                 });
                                             }
@@ -605,15 +624,15 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 status_message = t_with_args("status_downloading", &[("title", &video.title)]);
                                                 let page_videos = get_current_page_videos(current_list, current_page);
                                                 let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                                                terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages))?;
+                                                terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
                                                 
                                                 // Download video in background
                                                 let video_id = video.id.clone();
+                                                let video_title = video.title.clone();
+                                                let log_tx = log_tx_arc.clone();
                                                 tokio::spawn(async move {
-                                                    if let Err(e) = download_video(&video_id).await {
-                                                        eprintln!("Error downloading video: {}", e);
-                                                    } else {
-                                                        eprintln!("Downloaded video: {}", video_id);
+                                                    if let Err(e) = download_video(&video_id, Some((*log_tx).clone())).await {
+                                                        let _ = (*log_tx).send(format!("Error: {}", e));
                                                     }
                                                 });
                                             }
@@ -624,7 +643,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     status_message = t("status_refreshing");
                                     let page_videos = get_current_page_videos(current_list, current_page);
                                     let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                                    terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages))?;
+                                    terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
                                     
                                     // Refresh based on current view
                                     let result = match view_mode {
@@ -715,7 +734,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         current_page = 0;
                                         status_message = t("status_loading_videos");
                                         let empty: Vec<Video> = Vec::new();
-                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1))?;
+                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1, &log_message))?;
                                         
                                         match youtube_client.get_channel_videos(&channel_url).await {
                                             Ok(new_videos) => {
@@ -771,12 +790,13 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     Ok(())
 }
 
-fn ui_channel_menu(f: &mut Frame, channel_name: &str, status: &str) {
+fn ui_channel_menu(f: &mut Frame, channel_name: &str, status: &str, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(f.size());
@@ -822,6 +842,14 @@ fn ui_channel_menu(f: &mut Frame, channel_name: &str, status: &str) {
         .alignment(Alignment::Left);
     f.render_widget(menu, chunks[1]);
 
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[2]);
+
     // Status
     let help_text = "v/1: Videos | s/2: Shorts | p/3: Playlists | Esc: Back";
     let status_text = format!("{} | {}", status, help_text);
@@ -829,15 +857,16 @@ fn ui_channel_menu(f: &mut Frame, channel_name: &str, status: &str) {
         .style(Style::default().fg(Color::Green))
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    f.render_widget(status_widget, chunks[2]);
+    f.render_widget(status_widget, chunks[3]);
 }
 
-fn ui_main_menu(f: &mut Frame, status: &str) {
+fn ui_main_menu(f: &mut Frame, status: &str, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(f.size());
@@ -864,6 +893,14 @@ fn ui_main_menu(f: &mut Frame, status: &str) {
         .alignment(Alignment::Left);
     f.render_widget(menu, chunks[1]);
 
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[2]);
+
     // Status
     let help_text = format!("{} | {} | {} | {}", t("help_navigate"), t("help_select"), t("help_quit"), t("help_back"));
     let status_text = format!("{} | {}", status, help_text);
@@ -871,15 +908,16 @@ fn ui_main_menu(f: &mut Frame, status: &str) {
         .style(Style::default().fg(Color::Green))
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    f.render_widget(status_widget, chunks[2]);
+    f.render_widget(status_widget, chunks[3]);
 }
 
-fn ui_subscriptions(f: &mut Frame, subscriptions: &[Subscription], list_state: &mut ListState, status: &str) {
+fn ui_subscriptions(f: &mut Frame, subscriptions: &[Subscription], list_state: &mut ListState, status: &str, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(f.size());
@@ -922,6 +960,14 @@ fn ui_subscriptions(f: &mut Frame, subscriptions: &[Subscription], list_state: &
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list, chunks[1], list_state);
 
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[2]);
+
     // Status bar
     let help_text = "↑/↓/j/k: Navigate | Enter/Space: View Videos | r: Refresh | Esc/m: Back | q: Quit";
     let status_text = format!("{} | {}", status, help_text);
@@ -929,15 +975,16 @@ fn ui_subscriptions(f: &mut Frame, subscriptions: &[Subscription], list_state: &
         .style(Style::default().fg(Color::Green))
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    f.render_widget(status_widget, chunks[2]);
+    f.render_widget(status_widget, chunks[3]);
 }
 
-fn ui_playlists(f: &mut Frame, playlists: &[Playlist], list_state: &mut ListState, status: &str) {
+fn ui_playlists(f: &mut Frame, playlists: &[Playlist], list_state: &mut ListState, status: &str, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(f.size());
@@ -987,6 +1034,14 @@ fn ui_playlists(f: &mut Frame, playlists: &[Playlist], list_state: &mut ListStat
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list, chunks[1], list_state);
 
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[2]);
+
     // Status bar
     let help_text = "↑/↓/j/k: Navigate | Enter/Space: View Videos | r: Refresh | Esc/m: Back | q: Quit";
     let status_text = format!("{} | {}", status, help_text);
@@ -994,16 +1049,17 @@ fn ui_playlists(f: &mut Frame, playlists: &[Playlist], list_state: &mut ListStat
         .style(Style::default().fg(Color::Green))
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    f.render_widget(status_widget, chunks[2]);
+    f.render_widget(status_widget, chunks[3]);
 }
 
-fn ui_input(f: &mut Frame, channel_url: &str, status: &str) {
+fn ui_input(f: &mut Frame, channel_url: &str, status: &str, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(5),
             Constraint::Min(0),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(f.size());
@@ -1026,6 +1082,14 @@ fn ui_input(f: &mut Frame, channel_url: &str, status: &str) {
         .block(Block::default().borders(Borders::ALL).title("Channel URL"));
     f.render_widget(input, chunks[1]);
 
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[3]);
+
     // Status
     let help_text = "Examples: https://www.youtube.com/@channelname/videos | Press Enter to load | Esc/m: Back | q: Quit";
     let status_text = format!("{} | {}", status, help_text);
@@ -1033,15 +1097,16 @@ fn ui_input(f: &mut Frame, channel_url: &str, status: &str) {
         .style(Style::default().fg(Color::Green))
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    f.render_widget(status_widget, chunks[3]);
+    f.render_widget(status_widget, chunks[4]);
 }
 
-fn ui_videos(f: &mut Frame, videos: &[Video], list_state: &mut ListState, status: &str, current_page: usize, total_pages: usize) {
+fn ui_videos(f: &mut Frame, videos: &[Video], list_state: &mut ListState, status: &str, current_page: usize, total_pages: usize, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(f.size());
@@ -1101,6 +1166,14 @@ fn ui_videos(f: &mut Frame, videos: &[Video], list_state: &mut ListState, status
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list, chunks[1], list_state);
 
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[2]);
+
     // Status bar
     let help_text = if total_pages > 1 {
         "↑/↓/j/k: Navigate | p: Play | d: Download | ←/→: Prev/Next Page | r: Refresh | Esc: Back | q: Quit"
@@ -1112,7 +1185,7 @@ fn ui_videos(f: &mut Frame, videos: &[Video], list_state: &mut ListState, status
         .style(Style::default().fg(Color::Green))
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    f.render_widget(status_widget, chunks[2]);
+    f.render_widget(status_widget, chunks[3]);
 }
 
 fn format_date(date_str: &str) -> String {

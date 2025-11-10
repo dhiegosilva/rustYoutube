@@ -5,5 +5,55 @@ Cargo.lock
 token.json
 .env
 
+# Video files
+*.mp4
+*.webm
+*.mkv
+*.avi
+*.mov
+*.flv
+*.wmv
+*.m4v
+*.3gp
+*.ogv
+*.ts
+*.mts
+*.m2ts
+*.vob
+*.asf
+*.rm
+*.rmvb
+*.divx
+*.xvid
+*.f4v
+*.mpg
+*.mpeg
+*.m2v
+*.m4p
+*.m4b
+*.m4r
+*.3g2
+*.amv
+*.svi
+*.mxf
+*.roq
+*.nsv
+*.viv
+*.yuv
+*.drc
+*.gifv
+*.qt
+*.yuv
+*.ra
+*.rm
+*.rmvb
+*.rv
+*.smk
+*.swf
+*.vob
+*.wmv
+*.wvx
+*.y4m
+
 
 
