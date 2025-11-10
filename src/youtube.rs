@@ -33,12 +33,6 @@ pub struct YouTubeClient {
 }
 
 impl YouTubeClient {
-    pub fn new() -> Self {
-        Self {
-            client: None,
-            access_token: None,
-        }
-    }
 
     pub fn with_auth(client: Client, access_token: String) -> Self {
         Self {
@@ -240,23 +234,6 @@ impl YouTubeClient {
         Ok(subscriptions)
     }
 
-    // Get videos from subscriptions
-    pub async fn get_subscription_videos(&self) -> Result<Vec<Video>> {
-        let subscriptions = self.get_subscriptions().await?;
-        let mut all_videos = Vec::new();
-
-        for sub in subscriptions {
-            if let Ok(videos) = self.get_channel_videos_by_id(&sub.channel_id).await {
-                all_videos.extend(videos);
-            }
-        }
-
-        // Sort by date (newest first)
-        all_videos.sort_by(|a, b| b.published_at.cmp(&a.published_at));
-        all_videos.truncate(50); // Limit to 50 most recent
-
-        Ok(all_videos)
-    }
 
     // Get playlists
     pub async fn get_playlists(&self) -> Result<Vec<Playlist>> {

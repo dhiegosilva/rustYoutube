@@ -2,11 +2,14 @@ use crate::deps;
 use anyhow::Result;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
+use std::sync::Arc;
+
+// Format selector: prefer av01, then vp09, then anything else
+const FORMAT_SELECTOR: &str = "bestvideo[vcodec^=av01][height<=1080]+bestaudio/best[vcodec^=av01][height<=1080]/bestvideo[vcodec^=vp09][height<=1080]+bestaudio/best[vcodec^=vp09][height<=1080]/best[height<=1080]";
 
 #[derive(Debug, Clone)]
 struct HardwareCapabilities {
     hwdec_available: Vec<String>,
-    has_gpu: bool,
     performance_level: PerformanceLevel,
 }
 
@@ -26,7 +29,6 @@ async fn detect_hardware_capabilities(mpv_cmd: &str, log_tx: Option<mpsc::Unboun
     };
     
     let mut hwdec_available = Vec::new();
-    let mut has_gpu = false;
     let mut performance_level = PerformanceLevel::Low;
     
     // Try to detect hardware decoding support
@@ -41,35 +43,30 @@ async fn detect_hardware_capabilities(mpv_cmd: &str, log_tx: Option<mpsc::Unboun
         }
         if output_str.contains("d3d11va") {
             hwdec_available.push("d3d11va".to_string());
-            has_gpu = true;
         }
         if output_str.contains("nvdec") {
             hwdec_available.push("nvdec".to_string());
-            has_gpu = true;
         }
         if output_str.contains("vaapi") {
             hwdec_available.push("vaapi".to_string());
-            has_gpu = true;
         }
         if output_str.contains("videotoolbox") {
             hwdec_available.push("videotoolbox".to_string());
-            has_gpu = true;
         }
     }
     
-    // Determine performance level
-    if has_gpu && !hwdec_available.is_empty() {
+    // Determine performance level based on available hardware decoders
+    if hwdec_available.len() >= 2 {
         performance_level = PerformanceLevel::High;
     } else if !hwdec_available.is_empty() {
         performance_level = PerformanceLevel::Medium;
     }
     
-    send_log(&format!("Detected hardware: GPU={}, HWDec={:?}, Level={:?}", 
-        has_gpu, hwdec_available, performance_level));
+    send_log(&format!("Detected hardware: HWDec={:?}, Level={:?}", 
+        hwdec_available, performance_level));
     
     HardwareCapabilities {
         hwdec_available,
-        has_gpu,
         performance_level,
     }
 }
@@ -203,15 +200,12 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
     let exec_cmd = build_mpv_args(&mpv_cmd, &caps);
     send_log(&format!("Using optimized settings: {:?}", caps.performance_level));
     
-    // Format selector: prefer av01, then vp09, then anything else
-    let format_selector = "bestvideo[vcodec^=av01][height<=1080]+bestaudio/best[vcodec^=av01][height<=1080]/bestvideo[vcodec^=vp09][height<=1080]+bestaudio/best[vcodec^=vp09][height<=1080]/best[height<=1080]";
-    
     // Use --exec to launch mpv directly with progress output
     send_log("Fetching video stream with yt-dlp (preferring av01 > vp09 > other)...");
     
     let mut ytdlp = TokioCommand::new(&ytdlp_cmd)
         .arg("--format")
-        .arg(format_selector)
+        .arg(FORMAT_SELECTOR)
         .arg("--no-playlist")
         .arg("--progress")
         .arg("--newline")
@@ -247,6 +241,159 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
         });
     }
     
+    // Collect stderr output for better error messages
+    let mut stderr_output = Vec::new();
+    let stderr_handle = if let Some(stderr) = ytdlp.stderr.take() {
+        let log_tx_stderr = log_tx.clone();
+        Some(tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut reader = BufReader::new(stderr);
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            lines.push(trimmed.to_string());
+                            if let Some(ref tx) = log_tx_stderr {
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            lines.join("\n").into_bytes()
+        }))
+    } else {
+        None
+    };
+    
+    send_log("Starting mpv player...");
+    let status = ytdlp.wait().await?;
+    
+    // Get stderr output if available
+    if let Some(handle) = stderr_handle {
+        if let Ok(output) = handle.await {
+            stderr_output = output;
+        }
+    }
+    
+    if !status.success() {
+        let exit_code = status.code();
+        let error_msg = String::from_utf8_lossy(&stderr_output);
+        
+        // Provide more helpful error messages based on exit code
+        let user_friendly_error = match exit_code {
+            Some(120) => {
+                if error_msg.contains("HTTP Error 403") || error_msg.contains("Forbidden") {
+                    "Video is private or unavailable. Try a different video."
+                } else if error_msg.contains("timeout") || error_msg.contains("Connection") {
+                    "Network timeout. Check your internet connection and try again."
+                } else if error_msg.contains("format") || error_msg.contains("No video formats") {
+                    "Format selection failed. Trying fallback format..."
+                } else {
+                    "Video playback failed. This might be due to network issues or video unavailability."
+                }
+            }
+            Some(1) => "General error occurred. Check the error messages above.",
+            Some(2) => "yt-dlp argument error. This is a bug, please report it.",
+            _ => "Unknown error occurred during video playback.",
+        };
+        
+        send_log(&format!("Error: {} (Exit code: {:?})", user_friendly_error, exit_code));
+        
+        // For exit code 120 (format/network issues), try fallback format
+        if exit_code == Some(120) && (error_msg.contains("format") || error_msg.contains("No video formats") || error_msg.is_empty()) {
+            send_log("Retrying with fallback format (best available)...");
+            return play_video_fallback_format(video_id, log_tx).await;
+        }
+        
+        return Err(anyhow::anyhow!(
+            "{}\nExit code: {:?}\nError details: {}",
+            user_friendly_error,
+            exit_code,
+            if error_msg.is_empty() { "No additional error details available" } else { &error_msg }
+        ));
+    }
+    
+    send_log("Video playback completed.");
+    Ok(())
+}
+
+// Fallback function to try with simpler format selection
+async fn play_video_fallback_format(video_id: &str, log_tx: Option<mpsc::UnboundedSender<String>>) -> Result<()> {
+    let send_log = |msg: &str| {
+        if let Some(ref tx) = log_tx {
+            let _ = tx.send(msg.to_string());
+        }
+    };
+    
+    let url = format!("https://www.youtube.com/watch?v={}", video_id);
+    
+    #[cfg(windows)]
+    let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
+        local_ytdlp
+    } else {
+        std::path::PathBuf::from("yt-dlp.exe")
+    };
+    #[cfg(not(windows))]
+    let ytdlp_cmd = std::path::PathBuf::from("yt-dlp");
+    
+    #[cfg(windows)]
+    let mpv_cmd = if let Some(local_mpv) = deps::get_mpv_path().await {
+        local_mpv.to_string_lossy().to_string()
+    } else {
+        "mpv.exe".to_string()
+    };
+    #[cfg(not(windows))]
+    let mpv_cmd = "mpv".to_string();
+    
+    // Use simpler format selector as fallback
+    let fallback_format = "best[height<=1080]/best";
+    send_log(&format!("Trying fallback format: {}", fallback_format));
+    
+    let mut ytdlp = TokioCommand::new(&ytdlp_cmd)
+        .arg("--format")
+        .arg(fallback_format)
+        .arg("--no-playlist")
+        .arg("--progress")
+        .arg("--newline")
+        .arg("--exec")
+        .arg(&format!("{} --no-terminal --really-quiet --", mpv_cmd))
+        .arg(&url)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    
+    // Capture output
+    let log_tx_stdout = log_tx.clone();
+    if let Some(stdout) = ytdlp.stdout.take() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut reader = BufReader::new(stdout);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Some(ref tx) = log_tx_stdout {
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    
     let log_tx_stderr = log_tx.clone();
     if let Some(stderr) = ytdlp.stderr.take() {
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -256,7 +403,7 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(_) => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
@@ -271,100 +418,139 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
         });
     }
     
-    send_log("Starting mpv player...");
     let status = ytdlp.wait().await?;
     
     if !status.success() {
         let exit_code = status.code();
-        send_log(&format!("yt-dlp/mpv exited with code: {:?}", exit_code));
-        return Err(anyhow::anyhow!("Video playback failed. Exit code: {:?}", exit_code));
+        // Try final fallback with just 'best'
+        if exit_code == Some(120) {
+            send_log("Fallback format failed, trying basic 'best' format...");
+            return play_video_final_fallback(video_id, log_tx).await;
+        }
+        send_log(&format!("Fallback also failed with exit code: {:?}", exit_code));
+        return Err(anyhow::anyhow!(
+            "Video playback failed even with fallback format.\nExit code: {:?}\nThe video might be unavailable or your network connection is having issues.",
+            exit_code
+        ));
     }
     
-    send_log("Video playback completed.");
+    send_log("Video playback completed (using fallback format).");
     Ok(())
 }
 
-async fn play_video_fallback(url: &str, log_tx: Option<mpsc::UnboundedSender<String>>) -> Result<()> {
-    // Fallback: Use yt-dlp to get URL and play with mpv
-    // This is simpler and more reliable
-    
-    // Helper function to send log messages
+// Final fallback function using just 'best' format
+async fn play_video_final_fallback(video_id: &str, log_tx: Option<mpsc::UnboundedSender<String>>) -> Result<()> {
     let send_log = |msg: &str| {
         if let Some(ref tx) = log_tx {
             let _ = tx.send(msg.to_string());
         }
     };
     
-    // Ensure dependencies are available
-    if !deps::check_mpv().await {
-        deps::ensure_mpv().await?;
-    }
-    if !deps::check_ytdlp().await {
-        deps::ensure_ytdlp().await?;
-    }
+    let url = format!("https://www.youtube.com/watch?v={}", video_id);
     
-        // Get the best video URL using yt-dlp - use local version if available
-        #[cfg(windows)]
-        let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
-            local_ytdlp.to_str().unwrap().to_string()
-        } else {
-            "yt-dlp.exe".to_string()
-        };
-        #[cfg(not(windows))]
-        let ytdlp_cmd = "yt-dlp";
-        
-        // Format selector: prefer av01, then vp09, then anything else
-        let format_selector = "bestvideo[vcodec^=av01][height<=1080]+bestaudio/best[vcodec^=av01][height<=1080]/bestvideo[vcodec^=vp09][height<=1080]+bestaudio/best[vcodec^=vp09][height<=1080]/best[height<=1080]";
-        
-        send_log("Fetching video URL with yt-dlp...");
-        let output = TokioCommand::new(&ytdlp_cmd)
-        .arg("--format")
-        .arg(format_selector)
-        .arg("--get-url")
-        .arg("--no-warnings")
-        .arg(url)
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        let stdout_msg = String::from_utf8_lossy(&output.stdout);
-        send_log(&format!("yt-dlp failed. stderr: {}", error_msg));
-        send_log(&format!("yt-dlp stdout: {}", stdout_msg));
-        return Err(anyhow::anyhow!("Failed to get video URL from yt-dlp. Error: {}", error_msg));
-    }
-
-    let video_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    #[cfg(windows)]
+    let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
+        local_ytdlp
+    } else {
+        std::path::PathBuf::from("yt-dlp.exe")
+    };
+    #[cfg(not(windows))]
+    let ytdlp_cmd = std::path::PathBuf::from("yt-dlp");
     
-    if video_url.is_empty() {
-        let stderr_msg = String::from_utf8_lossy(&output.stderr);
-        send_log(&format!("yt-dlp returned empty URL. stderr: {}", stderr_msg));
-        return Err(anyhow::anyhow!("Empty video URL from yt-dlp. Error: {}", stderr_msg));
-    }
-    
-    send_log("Got video URL, starting mpv...");
-
-    // Play with mpv using the URL - use local mpv if available
     #[cfg(windows)]
     let mpv_cmd = if let Some(local_mpv) = deps::get_mpv_path().await {
-        local_mpv.to_str().unwrap().to_string()
+        local_mpv.to_string_lossy().to_string()
     } else {
         "mpv.exe".to_string()
     };
     #[cfg(not(windows))]
-    let mpv_cmd = "mpv";
+    let mpv_cmd = "mpv".to_string();
     
-    let mut mpv = TokioCommand::new(&mpv_cmd)
-        .arg(&video_url)
-        .arg("--no-terminal")
+    // Use yt-dlp default format (most compatible) - don't specify --format at all
+    send_log("Trying final fallback: using yt-dlp default format (most compatible)...");
+    
+    let mut ytdlp = TokioCommand::new(&ytdlp_cmd)
+        .arg("--no-playlist")
+        .arg("--progress")
+        .arg("--newline")
+        .arg("--exec")
+        .arg(&format!("{} --no-terminal --really-quiet --", mpv_cmd))
+        .arg(&url)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
-
-    mpv.wait().await?;
     
+    // Capture output
+    let log_tx_stdout = log_tx.clone();
+    if let Some(stdout) = ytdlp.stdout.take() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut reader = BufReader::new(stdout);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Some(ref tx) = log_tx_stdout {
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    
+    let log_tx_stderr = log_tx.clone();
+    if let Some(stderr) = ytdlp.stderr.take() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut reader = BufReader::new(stderr);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Some(ref tx) = log_tx_stderr {
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    
+    let status = ytdlp.wait().await?;
+    
+    if !status.success() {
+        let exit_code = status.code();
+        send_log(&format!("Final fallback also failed with exit code: {:?}", exit_code));
+        return Err(anyhow::anyhow!(
+            "Video playback failed with all format options.\nExit code: {:?}\nThe video might be unavailable, private, or your network connection is having issues.",
+            exit_code
+        ));
+    }
+    
+    send_log("Video playback completed (using yt-dlp default format).");
     Ok(())
 }
 
-pub async fn download_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<String>>) -> Result<()> {
+
+pub async fn download_video(
+    video_id: &str, 
+    log_tx: Option<mpsc::UnboundedSender<String>>,
+    handle_storage: Option<Arc<std::sync::Mutex<Option<tokio::process::Child>>>>
+) -> Result<()> {
+    use tokio::process::Child;
     // Ensure yt-dlp is available
     if !deps::check_ytdlp().await {
         deps::ensure_ytdlp().await?;
@@ -382,9 +568,6 @@ pub async fn download_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender
     #[cfg(not(windows))]
     let ytdlp_cmd = "yt-dlp";
     
-    // Download video with best quality, prefer av01, then vp09, then anything else
-    let format_selector = "bestvideo[vcodec^=av01][height<=1080]+bestaudio/best[vcodec^=av01][height<=1080]/bestvideo[vcodec^=vp09][height<=1080]+bestaudio/best[vcodec^=vp09][height<=1080]/best[height<=1080]";
-    
     // Helper function to send log messages
     let send_log = |msg: &str| {
         if let Some(ref tx) = log_tx {
@@ -395,7 +578,7 @@ pub async fn download_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender
     send_log("Starting download with yt-dlp...");
     let mut download = TokioCommand::new(&ytdlp_cmd)
         .arg("--format")
-        .arg(format_selector)
+        .arg(FORMAT_SELECTOR)
         .arg("--progress")
         .arg("--newline")
         .arg("--output")
@@ -404,10 +587,20 @@ pub async fn download_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
+    
+    // Take stdout and stderr before storing handle
+    let stdout = download.stdout.take();
+    let stderr = download.stderr.take();
+    
+    // Store the handle for cancellation
+    if let Some(ref handle_storage) = &handle_storage {
+        let mut guard = handle_storage.lock().unwrap();
+        *guard = Some(download);
+    }
 
     // Capture and print output in real-time
     let log_tx_stdout = log_tx.clone();
-    if let Some(stdout) = download.stdout.take() {
+    if let Some(stdout) = stdout {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let mut reader = BufReader::new(stdout);
         tokio::spawn(async move {
@@ -431,7 +624,7 @@ pub async fn download_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender
     }
     
     let log_tx_stderr = log_tx.clone();
-    if let Some(stderr) = download.stderr.take() {
+    if let Some(stderr) = stderr {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let mut reader = BufReader::new(stderr);
         tokio::spawn(async move {
@@ -454,7 +647,37 @@ pub async fn download_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender
         });
     }
 
-    let status = download.wait().await?;
+    // Wait for download to complete
+    let status = if let Some(ref handle_storage) = &handle_storage {
+        // Take the child out of the mutex before awaiting
+        let mut child = {
+            let mut child_guard = handle_storage.lock().unwrap();
+            child_guard.take()
+        };
+        
+        if let Some(mut child_process) = child {
+            let result = child_process.wait().await;
+            // Clear handle after completion
+            {
+                let mut child_guard = handle_storage.lock().unwrap();
+                *child_guard = None;
+            }
+            match result {
+                Ok(status) => status,
+                Err(e) => {
+                    send_log(&format!("Error waiting for download: {}", e));
+                    return Err(anyhow::anyhow!("Error waiting for download: {}", e));
+                }
+            }
+        } else {
+            // Handle was already taken (cancelled)
+            send_log("Download was cancelled");
+            return Err(anyhow::anyhow!("Download was cancelled"));
+        }
+    } else {
+        return Err(anyhow::anyhow!("Handle storage required for cancellation support"));
+    };
+    
     if !status.success() {
         send_log(&format!("Download failed with exit code: {:?}", status.code()));
         return Err(anyhow::anyhow!("Download failed with exit code: {:?}", status.code()));

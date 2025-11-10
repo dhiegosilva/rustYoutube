@@ -15,6 +15,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::process::Child;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ViewMode {
@@ -68,6 +69,10 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     let mut log_message = String::new(); // Store yt-dlp output messages
     let mut should_quit = false;
     
+    // Store handles for cancellation (download and playback)
+    let download_handle: Arc<std::sync::Mutex<Option<Child>>> = Arc::new(std::sync::Mutex::new(None));
+    let playback_handle: Arc<std::sync::Mutex<Option<Child>>> = Arc::new(std::sync::Mutex::new(None));
+    
     // Pagination state
     const VIDEOS_PER_PAGE: usize = 20;
     let mut current_page = 0;
@@ -81,6 +86,11 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
         } else {
             Vec::new()
         }
+    };
+    
+    // Helper function to calculate total pages
+    let calculate_total_pages = |count: usize| -> usize {
+        (count + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1)
     };
     
     // Helper function to separate videos and shorts
@@ -106,10 +116,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
 
     loop {
         // Check for log messages (non-blocking) - collect all pending messages
-        let mut log_updated = false;
         while let Ok(msg) = log_rx.try_recv() {
             log_message = msg;
-            log_updated = true;
         }
         // If multiple messages came in, keep the latest one
 
@@ -128,7 +136,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                 ViewMode::SubscriptionVideos | ViewMode::SubscriptionShorts => {
                     let current_list = if view_mode == ViewMode::SubscriptionShorts { &all_shorts } else { &all_videos };
                     let page_videos = get_current_page_videos(current_list, current_page);
-                    let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                    let total_pages = calculate_total_pages(current_list.len());
                     ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message);
                 }
                 ViewMode::SubscriptionPlaylists => {
@@ -139,7 +147,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                 }
                 ViewMode::PlaylistVideos => {
                     let page_videos = get_current_page_videos(&all_videos, current_page);
-                    let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                    let total_pages = calculate_total_pages(all_videos.len());
                     ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message);
                 }
                 ViewMode::ChannelInput => {
@@ -147,7 +155,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                 }
                 ViewMode::ChannelVideos => {
                     let page_videos = get_current_page_videos(&all_videos, current_page);
-                    let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                    let total_pages = calculate_total_pages(all_videos.len());
                     ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message);
                 }
             }
@@ -297,7 +305,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 all_videos = videos;
                                                 all_shorts = shorts;
                                                 video_list_state.select(Some(0));
-                                                let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                let total_pages = calculate_total_pages(all_videos.len());
                                                 status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
                                             }
                                             Err(e) => {
@@ -323,7 +331,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 all_videos = videos;
                                                 all_shorts = shorts;
                                                 video_list_state.select(Some(0));
-                                                let total_pages = (all_shorts.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                let total_pages = calculate_total_pages(all_shorts.len());
                                                 status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
                                             }
                                             Err(e) => {
@@ -397,7 +405,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 Ok(new_videos) => {
                                                     all_videos = new_videos;
                                                     video_list_state.select(Some(0));
-                                                    let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                    let total_pages = calculate_total_pages(all_videos.len());
                                                     status_message = t_with_args("status_loaded_videos_from", &[
                                                         ("count", &all_videos.len().to_string()),
                                                         ("channel", &playlist.title),
@@ -470,7 +478,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 Ok(new_videos) => {
                                                     all_videos = new_videos;
                                                     video_list_state.select(Some(0));
-                                                    let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                    let total_pages = calculate_total_pages(all_videos.len());
                                                     status_message = t_with_args("status_loaded_videos_from", &[
                                                         ("count", &all_videos.len().to_string()),
                                                         ("channel", &playlist.title),
@@ -549,13 +557,12 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Char('n') => {
+                                KeyCode::Char('n') | KeyCode::Right => {
                                     // Next page
-                                    let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                    let total_pages = calculate_total_pages(current_list.len());
                                     if current_page < total_pages.saturating_sub(1) {
                                         current_page += 1;
                                         video_list_state.select(Some(0));
-                                        let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
                                         status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
                                     }
                                 }
@@ -564,17 +571,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     if current_page > 0 {
                                         current_page -= 1;
                                         video_list_state.select(Some(0));
-                                        let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                                        status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
-                                    }
-                                }
-                                KeyCode::Right => {
-                                    // Next page
-                                    let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
-                                    if current_page < total_pages.saturating_sub(1) {
-                                        current_page += 1;
-                                        video_list_state.select(Some(0));
-                                        let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                        let total_pages = calculate_total_pages(current_list.len());
                                         status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
                                     }
                                 }
@@ -583,7 +580,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     if current_page > 0 {
                                         current_page -= 1;
                                         video_list_state.select(Some(0));
-                                        let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                        let total_pages = calculate_total_pages(current_list.len());
                                         status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
                                     }
                                 }
@@ -597,12 +594,11 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 let video = &current_list[actual_index];
                                                 status_message = t_with_args("status_playing", &[("title", &video.title)]);
                                                 let page_videos = get_current_page_videos(current_list, current_page);
-                                                let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                let total_pages = calculate_total_pages(current_list.len());
                                                 terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
                                                 
                                                 // Play video in background
                                                 let video_id = video.id.clone();
-                                                let video_title = video.title.clone();
                                                 let log_tx = log_tx_arc.clone();
                                                 tokio::spawn(async move {
                                                     if let Err(e) = play_video(&video_id, Some((*log_tx).clone())).await {
@@ -623,15 +619,15 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 let video = &current_list[actual_index];
                                                 status_message = t_with_args("status_downloading", &[("title", &video.title)]);
                                                 let page_videos = get_current_page_videos(current_list, current_page);
-                                                let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                let total_pages = calculate_total_pages(current_list.len());
                                                 terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
                                                 
                                                 // Download video in background
                                                 let video_id = video.id.clone();
-                                                let video_title = video.title.clone();
                                                 let log_tx = log_tx_arc.clone();
+                                                let download_handle_clone = download_handle.clone();
                                                 tokio::spawn(async move {
-                                                    if let Err(e) = download_video(&video_id, Some((*log_tx).clone())).await {
+                                                    if let Err(e) = download_video(&video_id, Some((*log_tx).clone()), Some(download_handle_clone)).await {
                                                         let _ = (*log_tx).send(format!("Error: {}", e));
                                                     }
                                                 });
@@ -639,10 +635,28 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         }
                                     }
                                 }
+                                KeyCode::Char('c') => {
+                                    // Cancel ongoing download
+                                    let mut handle_guard = download_handle.lock().unwrap();
+                                    if let Some(mut child) = handle_guard.take() {
+                                        // Kill the process asynchronously
+                                        let log_tx_cancel = log_tx_arc.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = child.kill().await {
+                                                // Process might have already finished, ignore error
+                                                let _ = e;
+                                            }
+                                        });
+                                        status_message = "Download cancelled".to_string();
+                                        let _ = log_tx_arc.send("Download cancelled by user".to_string());
+                                    } else {
+                                        status_message = "No active download to cancel".to_string();
+                                    }
+                                }
                                 KeyCode::Char('r') => {
                                     status_message = t("status_refreshing");
                                     let page_videos = get_current_page_videos(current_list, current_page);
-                                    let total_pages = (current_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                    let total_pages = calculate_total_pages(current_list.len());
                                     terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
                                     
                                     // Refresh based on current view
@@ -691,7 +705,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 let refreshed_list = if view_mode == ViewMode::SubscriptionShorts { &all_shorts } else { &all_videos };
                                                 current_page = 0;
                                                 video_list_state.select(Some(0));
-                                                let total_pages = (refreshed_list.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                let total_pages = calculate_total_pages(refreshed_list.len());
                                                 status_message = format!("Loaded {} {} from {} (Page {}/{})", 
                                                     refreshed_list.len(),
                                                     if view_mode == ViewMode::SubscriptionShorts { "shorts" } else { "videos" },
@@ -702,7 +716,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 all_videos = new_videos;
                                                 current_page = 0;
                                                 video_list_state.select(Some(0));
-                                                let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                let total_pages = calculate_total_pages(all_videos.len());
                                                 status_message = t_with_args("status_loaded_videos_channel", &[
                                                     ("count", &all_videos.len().to_string()),
                                                     ("page", &(current_page + 1).to_string()),
@@ -740,7 +754,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             Ok(new_videos) => {
                                                 all_videos = new_videos;
                                                 video_list_state.select(Some(0));
-                                                let total_pages = (all_videos.len() + VIDEOS_PER_PAGE - 1) / VIDEOS_PER_PAGE.max(1);
+                                                let total_pages = calculate_total_pages(all_videos.len());
                                                 status_message = t_with_args("status_loaded_videos_channel", &[
                                                     ("count", &all_videos.len().to_string()),
                                                     ("page", &(current_page + 1).to_string()),
@@ -1176,9 +1190,9 @@ fn ui_videos(f: &mut Frame, videos: &[Video], list_state: &mut ListState, status
 
     // Status bar
     let help_text = if total_pages > 1 {
-        "↑/↓/j/k: Navigate | p: Play | d: Download | ←/→: Prev/Next Page | r: Refresh | Esc: Back | q: Quit"
+        "↑/↓/j/k: Navigate | p: Play | d: Download | c: Cancel | ←/→: Prev/Next Page | r: Refresh | Esc: Back | q: Quit"
     } else {
-        "↑/↓/j/k: Navigate | p: Play | d: Download | r: Refresh | Esc: Back | q: Quit"
+        "↑/↓/j/k: Navigate | p: Play | d: Download | c: Cancel | r: Refresh | Esc: Back | q: Quit"
     };
     let status_text = format!("{} | {}", status, help_text);
     let status_widget = Paragraph::new(status_text)

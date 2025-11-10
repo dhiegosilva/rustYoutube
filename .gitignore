@@ -55,5 +55,10 @@ token.json
 *.wvx
 *.y4m
 
+# Incomplete downloads (yt-dlp temporary files)
+*.part
+*.part-Frag*.part
+*.ytdl
+
 
 
