@@ -550,7 +550,6 @@ pub async fn download_video(
     log_tx: Option<mpsc::UnboundedSender<String>>,
     handle_storage: Option<Arc<std::sync::Mutex<Option<tokio::process::Child>>>>
 ) -> Result<()> {
-    use tokio::process::Child;
     // Ensure yt-dlp is available
     if !deps::check_ytdlp().await {
         deps::ensure_ytdlp().await?;
@@ -650,7 +649,7 @@ pub async fn download_video(
     // Wait for download to complete
     let status = if let Some(ref handle_storage) = &handle_storage {
         // Take the child out of the mutex before awaiting
-        let mut child = {
+        let child = {
             let mut child_guard = handle_storage.lock().unwrap();
             child_guard.take()
         };

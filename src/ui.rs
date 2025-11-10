@@ -64,6 +64,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     let mut video_list_state = ListState::default();
     let mut subscription_list_state = ListState::default();
     let mut playlist_list_state = ListState::default();
+    let mut main_menu_selection = 0; // Track main menu selection (0=s, 1=p, 2=c, 3=q)
+    let mut channel_tab = 0; // Track channel tab selection (0=Videos, 1=Shorts, 2=Playlists)
     let mut channel_url = String::new();
     let mut status_message = t("status_welcome");
     let mut log_message = String::new(); // Store yt-dlp output messages
@@ -111,7 +113,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
 
     // Initial render
     terminal.draw(|f| {
-        ui_main_menu(f, &status_message, &log_message);
+        ui_main_menu(f, main_menu_selection, &status_message, &log_message);
     })?;
 
     loop {
@@ -125,22 +127,27 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
         terminal.draw(|f| {
             match view_mode {
                 ViewMode::MainMenu => {
-                    ui_main_menu(f, &status_message, &log_message);
+                    ui_main_menu(f, main_menu_selection, &status_message, &log_message);
                 }
                 ViewMode::Subscriptions => {
                     ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message, &log_message);
                 }
                 ViewMode::ChannelMenu => {
-                    ui_channel_menu(f, selected_channel_title.as_deref().unwrap_or("Channel"), &status_message, &log_message);
+                    // Channel menu is now replaced with tabs, but we keep this for backward compatibility
+                    // This should not be reached in normal flow, but if it is, show videos
+                    let page_videos = get_current_page_videos(&all_videos, current_page);
+                    let total_pages = calculate_total_pages(all_videos.len());
+                    ui_channel_with_tabs(f, &page_videos, &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, current_page + 1, total_pages, &log_message);
                 }
                 ViewMode::SubscriptionVideos | ViewMode::SubscriptionShorts => {
                     let current_list = if view_mode == ViewMode::SubscriptionShorts { &all_shorts } else { &all_videos };
                     let page_videos = get_current_page_videos(current_list, current_page);
                     let total_pages = calculate_total_pages(current_list.len());
-                    ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message);
+                    ui_channel_with_tabs(f, &page_videos, &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, current_page + 1, total_pages, &log_message);
                 }
                 ViewMode::SubscriptionPlaylists => {
-                    ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message, &log_message);
+                    // Show playlists tab view - render playlists list
+                    ui_channel_with_tabs_playlists(f, &channel_playlists, &mut playlist_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, &log_message);
                 }
                 ViewMode::Playlists => {
                     ui_playlists(f, &playlists, &mut playlist_list_state, &status_message, &log_message);
@@ -168,10 +175,83 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                     match view_mode {
                         ViewMode::MainMenu => {
                             match key.code {
-                                KeyCode::Char('q') => {
+                                KeyCode::Char('q') | KeyCode::Char('Q') => {
                                     should_quit = true;
                                 }
-                                KeyCode::Char('s') => {
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if main_menu_selection > 0 {
+                                        main_menu_selection -= 1;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if main_menu_selection < 3 {
+                                        main_menu_selection += 1;
+                                    }
+                                }
+                                KeyCode::Enter | KeyCode::Char(' ') => {
+                                    match main_menu_selection {
+                                        0 => {
+                                            // Subscriptions
+                                            if youtube_client.is_authenticated() {
+                                                view_mode = ViewMode::Subscriptions;
+                                                status_message = t("status_loading_subscriptions");
+                                                terminal.draw(|f| ui_subscriptions(f, &subscriptions, &mut subscription_list_state, &status_message, &log_message))?;
+                                                
+                                                match youtube_client.get_subscriptions().await {
+                                                    Ok(new_subs) => {
+                                                        subscriptions = new_subs;
+                                                        if subscriptions.is_empty() {
+                                                            status_message = t("status_no_subscriptions");
+                                                        } else {
+                                                            subscription_list_state.select(Some(0));
+                                                            status_message = t_with_args("status_loaded_subscriptions", &[("count", &subscriptions.len().to_string())]);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        status_message = format!("Error: {}", e);
+                                                        view_mode = ViewMode::MainMenu;
+                                                    }
+                                                }
+                                            } else {
+                                                status_message = "Not authenticated. Please check your credentials.".to_string();
+                                            }
+                                        }
+                                        1 => {
+                                            // Playlists
+                                            if youtube_client.is_authenticated() {
+                                                view_mode = ViewMode::Playlists;
+                                                status_message = t("status_loading_playlists");
+                                                terminal.draw(|f| ui_playlists(f, &playlists, &mut playlist_list_state, &status_message, &log_message))?;
+                                                
+                                                match youtube_client.get_playlists().await {
+                                                    Ok(new_playlists) => {
+                                                        playlists = new_playlists;
+                                                        playlist_list_state.select(Some(0));
+                                                        status_message = format!("Loaded {} playlists", playlists.len());
+                                                    }
+                                                    Err(e) => {
+                                                        status_message = format!("Error: {}", e);
+                                                        view_mode = ViewMode::MainMenu;
+                                                    }
+                                                }
+                                            } else {
+                                                status_message = "Not authenticated. Please check your credentials.".to_string();
+                                            }
+                                        }
+                                        2 => {
+                                            // Channel Input
+                                            view_mode = ViewMode::ChannelInput;
+                                            channel_url.clear();
+                                            status_message = t("channel_input_title");
+                                        }
+                                        3 => {
+                                            // Quit
+                                            should_quit = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                KeyCode::Char('s') | KeyCode::Char('S') => {
                                     if youtube_client.is_authenticated() {
                                         view_mode = ViewMode::Subscriptions;
                                         status_message = t("status_loading_subscriptions");
@@ -196,7 +276,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         status_message = "Not authenticated. Please check your credentials.".to_string();
                                     }
                                 }
-                                KeyCode::Char('p') => {
+                                KeyCode::Char('p') | KeyCode::Char('P') => {
                                     if youtube_client.is_authenticated() {
                                         view_mode = ViewMode::Playlists;
                                         status_message = t("status_loading_playlists");
@@ -217,7 +297,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         status_message = "Not authenticated. Please check your credentials.".to_string();
                                     }
                                 }
-                                KeyCode::Char('c') => {
+                                KeyCode::Char('c') | KeyCode::Char('C') => {
                                     view_mode = ViewMode::ChannelInput;
                                     channel_url.clear();
                                     status_message = t("channel_input_title");
@@ -254,8 +334,29 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             let sub = &subscriptions[selected];
                                             selected_channel_id = Some(sub.channel_id.clone());
                                             selected_channel_title = Some(sub.channel_title.clone());
-                                            view_mode = ViewMode::ChannelMenu;
-                                            status_message = format!("Select what to view from {}", sub.channel_title);
+                                            // Default to Videos tab
+                                            channel_tab = 0;
+                                            view_mode = ViewMode::SubscriptionVideos;
+                                            current_page = 0;
+                                            status_message = format!("Loading videos from {}...", sub.channel_title);
+                                            let empty: Vec<Video> = Vec::new();
+                                            terminal.draw(|f| ui_channel_with_tabs(f, &empty, &mut video_list_state, &sub.channel_title, channel_tab, &status_message, 1, 1, &log_message))?;
+                                            
+                                            match youtube_client.get_channel_videos_by_id(&sub.channel_id).await {
+                                                Ok(new_videos) => {
+                                                    // Separate videos and shorts
+                                                    let (videos, shorts) = separate_videos_and_shorts(new_videos);
+                                                    all_videos = videos;
+                                                    all_shorts = shorts;
+                                                    video_list_state.select(Some(0));
+                                                    let total_pages = calculate_total_pages(all_videos.len());
+                                                    status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), sub.channel_title, current_page + 1, total_pages.max(1));
+                                                }
+                                                Err(e) => {
+                                                    status_message = format!("Error: {}", e);
+                                                    view_mode = ViewMode::Subscriptions;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -280,93 +381,10 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                             }
                         }
                         ViewMode::ChannelMenu => {
-                            match key.code {
-                                KeyCode::Char('q') => {
-                                    should_quit = true;
-                                }
-                                KeyCode::Esc => {
-                                    view_mode = ViewMode::Subscriptions;
-                                    selected_channel_id = None;
-                                    selected_channel_title = None;
-                                }
-                                KeyCode::Char('v') | KeyCode::Char('1') => {
-                                    // View Videos
-                                    if let Some(channel_id) = &selected_channel_id {
-                                        view_mode = ViewMode::SubscriptionVideos;
-                                        current_page = 0;
-                                        status_message = format!("Loading videos from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
-                                        let empty: Vec<Video> = Vec::new();
-                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1, &log_message))?;
-                                        
-                                        match youtube_client.get_channel_videos_by_id(channel_id).await {
-                                            Ok(new_videos) => {
-                                                // Separate videos and shorts
-                                                let (videos, shorts) = separate_videos_and_shorts(new_videos);
-                                                all_videos = videos;
-                                                all_shorts = shorts;
-                                                video_list_state.select(Some(0));
-                                                let total_pages = calculate_total_pages(all_videos.len());
-                                                status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
-                                            }
-                                            Err(e) => {
-                                                status_message = format!("Error: {}", e);
-                                                view_mode = ViewMode::ChannelMenu;
-                                            }
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('s') | KeyCode::Char('2') => {
-                                    // View Shorts
-                                    if let Some(channel_id) = &selected_channel_id {
-                                        view_mode = ViewMode::SubscriptionShorts;
-                                        current_page = 0;
-                                        status_message = format!("Loading shorts from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
-                                        let empty: Vec<Video> = Vec::new();
-                                        terminal.draw(|f| ui_videos(f, &empty, &mut video_list_state, &status_message, 1, 1, &log_message))?;
-                                        
-                                        match youtube_client.get_channel_videos_by_id(channel_id).await {
-                                            Ok(new_videos) => {
-                                                // Separate videos and shorts
-                                                let (videos, shorts) = separate_videos_and_shorts(new_videos);
-                                                all_videos = videos;
-                                                all_shorts = shorts;
-                                                video_list_state.select(Some(0));
-                                                let total_pages = calculate_total_pages(all_shorts.len());
-                                                status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
-                                            }
-                                            Err(e) => {
-                                                status_message = format!("Error: {}", e);
-                                                view_mode = ViewMode::ChannelMenu;
-                                            }
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('p') | KeyCode::Char('3') => {
-                                    // View Playlists
-                                    if let Some(channel_id) = &selected_channel_id {
-                                        view_mode = ViewMode::SubscriptionPlaylists;
-                                        status_message = format!("Loading playlists from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
-                                        terminal.draw(|f| ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message, &log_message))?;
-                                        
-                                        match youtube_client.get_channel_playlists(channel_id).await {
-                                            Ok(new_playlists) => {
-                                                channel_playlists = new_playlists;
-                                                if channel_playlists.is_empty() {
-                                                    status_message = format!("No playlists found for {}", selected_channel_title.as_deref().unwrap_or("channel"));
-                                                } else {
-                                                    playlist_list_state.select(Some(0));
-                                                    status_message = format!("Loaded {} playlists from {}", channel_playlists.len(), selected_channel_title.as_deref().unwrap_or("channel"));
-                                                }
-                                            }
-                                            Err(e) => {
-                                                status_message = format!("Error: {}", e);
-                                                view_mode = ViewMode::ChannelMenu;
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
+                            // This mode is now deprecated, but kept for compatibility
+                            // Should redirect to SubscriptionVideos with tabs
+                            view_mode = ViewMode::SubscriptionVideos;
+                            channel_tab = 0;
                         }
                         ViewMode::Playlists => {
                             match key.code {
@@ -443,12 +461,14 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                         }
                         ViewMode::SubscriptionPlaylists => {
                             match key.code {
-                                KeyCode::Char('q') => {
+                                KeyCode::Char('q') | KeyCode::Char('Q') => {
                                     should_quit = true;
                                 }
                                 KeyCode::Esc => {
-                                    view_mode = ViewMode::ChannelMenu;
-                                    status_message = format!("Select what to view from {}", selected_channel_title.as_deref().unwrap_or("channel"));
+                                    view_mode = ViewMode::Subscriptions;
+                                    selected_channel_id = None;
+                                    selected_channel_title = None;
+                                    channel_tab = 0;
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => {
                                     if let Some(selected) = playlist_list_state.selected() {
@@ -494,9 +514,56 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Char('r') => {
+                                KeyCode::Left | KeyCode::Char('h') => {
+                                    // Switch to previous tab
+                                    if channel_tab > 0 {
+                                        channel_tab -= 1;
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                        if channel_tab == 0 {
+                                            view_mode = ViewMode::SubscriptionVideos;
+                                            if !all_videos.is_empty() {
+                                                let total_pages = calculate_total_pages(all_videos.len());
+                                                status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                            }
+                                        } else if channel_tab == 1 {
+                                            view_mode = ViewMode::SubscriptionShorts;
+                                            if !all_shorts.is_empty() {
+                                                let total_pages = calculate_total_pages(all_shorts.len());
+                                                status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                            }
+                                        }
+                                    }
+                                }
+                                KeyCode::Right | KeyCode::Char('l') => {
+                                    // Already on last tab
+                                }
+                                KeyCode::Char('1') => {
+                                    channel_tab = 0;
+                                    current_page = 0;
+                                    video_list_state.select(Some(0));
+                                    view_mode = ViewMode::SubscriptionVideos;
+                                    if !all_videos.is_empty() {
+                                        let total_pages = calculate_total_pages(all_videos.len());
+                                        status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                    }
+                                }
+                                KeyCode::Char('2') => {
+                                    channel_tab = 1;
+                                    current_page = 0;
+                                    video_list_state.select(Some(0));
+                                    view_mode = ViewMode::SubscriptionShorts;
+                                    if !all_shorts.is_empty() {
+                                        let total_pages = calculate_total_pages(all_shorts.len());
+                                        status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                    }
+                                }
+                                KeyCode::Char('3') => {
+                                    // Already on playlists tab
+                                }
+                                KeyCode::Char('r') | KeyCode::Char('R') => {
                                     status_message = t("status_refreshing");
-                                    terminal.draw(|f| ui_playlists(f, &channel_playlists, &mut playlist_list_state, &status_message, &log_message))?;
+                                    terminal.draw(|f| ui_channel_with_tabs_playlists(f, &channel_playlists, &mut playlist_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, &log_message))?;
                                     
                                     if let Some(channel_id) = &selected_channel_id {
                                         match youtube_client.get_channel_playlists(channel_id).await {
@@ -521,17 +588,22 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                             let current_list = if view_mode == ViewMode::SubscriptionShorts { &all_shorts } else { &all_videos };
                             
                             match key.code {
-                                KeyCode::Char('q') => {
+                                KeyCode::Char('q') | KeyCode::Char('Q') => {
                                     should_quit = true;
                                 }
                                 KeyCode::Esc => {
                                     // Go back to previous view
-                                    if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts {
-                                        view_mode = ViewMode::ChannelMenu;
+                                    if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts || view_mode == ViewMode::SubscriptionPlaylists {
+                                        view_mode = ViewMode::Subscriptions;
+                                        selected_channel_id = None;
+                                        selected_channel_title = None;
+                                        channel_tab = 0;
                                     } else if view_mode == ViewMode::PlaylistVideos {
                                         // Check if we came from channel playlists or regular playlists
                                         if selected_channel_id.is_some() {
+                                            // Go back to channel tabs view
                                             view_mode = ViewMode::SubscriptionPlaylists;
+                                            channel_tab = 2; // Playlists tab
                                         } else {
                                             view_mode = ViewMode::Playlists;
                                         }
@@ -541,6 +613,220 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     all_videos.clear();
                                     all_shorts.clear();
                                     current_page = 0;
+                                }
+                                // Tab navigation for channel views
+                                KeyCode::Left | KeyCode::Char('h') if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts || view_mode == ViewMode::SubscriptionPlaylists => {
+                                    if channel_tab > 0 {
+                                        channel_tab -= 1;
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                        
+                                        // Switch to the appropriate view mode and load data
+                                        if let Some(channel_id) = &selected_channel_id {
+                                            match channel_tab {
+                                                0 => {
+                                                    // Videos tab
+                                                    view_mode = ViewMode::SubscriptionVideos;
+                                                    status_message = format!("Loading videos from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                    let empty: Vec<Video> = Vec::new();
+                                                    terminal.draw(|f| ui_channel_with_tabs(f, &empty, &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, 1, 1, &log_message))?;
+                                                    
+                                                    // If we already have videos loaded, just switch view
+                                                    if !all_videos.is_empty() {
+                                                        let total_pages = calculate_total_pages(all_videos.len());
+                                                        status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                    } else {
+                                                        match youtube_client.get_channel_videos_by_id(channel_id).await {
+                                                            Ok(new_videos) => {
+                                                                let (videos, shorts) = separate_videos_and_shorts(new_videos);
+                                                                all_videos = videos;
+                                                                all_shorts = shorts;
+                                                                let total_pages = calculate_total_pages(all_videos.len());
+                                                                status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                            }
+                                                            Err(e) => {
+                                                                status_message = format!("Error: {}", e);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                1 => {
+                                                    // Shorts tab
+                                                    view_mode = ViewMode::SubscriptionShorts;
+                                                    status_message = format!("Loading shorts from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                    let empty: Vec<Video> = Vec::new();
+                                                    terminal.draw(|f| ui_channel_with_tabs(f, &empty, &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, 1, 1, &log_message))?;
+                                                    
+                                                    if !all_shorts.is_empty() {
+                                                        let total_pages = calculate_total_pages(all_shorts.len());
+                                                        status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                    } else if !all_videos.is_empty() {
+                                                        // Videos were loaded, but shorts might not be separated yet
+                                                        let total_pages = calculate_total_pages(all_shorts.len());
+                                                        status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                    } else {
+                                                        match youtube_client.get_channel_videos_by_id(channel_id).await {
+                                                            Ok(new_videos) => {
+                                                                let (videos, shorts) = separate_videos_and_shorts(new_videos);
+                                                                all_videos = videos;
+                                                                all_shorts = shorts;
+                                                                let total_pages = calculate_total_pages(all_shorts.len());
+                                                                status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                            }
+                                                            Err(e) => {
+                                                                status_message = format!("Error: {}", e);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                2 => {
+                                                    // Playlists tab
+                                                    view_mode = ViewMode::SubscriptionPlaylists;
+                                                    status_message = format!("Loading playlists from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                    terminal.draw(|f| ui_channel_with_tabs(f, &[], &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, 1, 1, &log_message))?;
+                                                    
+                                                    match youtube_client.get_channel_playlists(channel_id).await {
+                                                        Ok(new_playlists) => {
+                                                            channel_playlists = new_playlists;
+                                                            if channel_playlists.is_empty() {
+                                                                status_message = format!("No playlists found for {}", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                            } else {
+                                                                playlist_list_state.select(Some(0));
+                                                                status_message = format!("Loaded {} playlists from {}", channel_playlists.len(), selected_channel_title.as_deref().unwrap_or("channel"));
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            status_message = format!("Error: {}", e);
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                                KeyCode::Right | KeyCode::Char('l') if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts || view_mode == ViewMode::SubscriptionPlaylists => {
+                                    if channel_tab < 2 {
+                                        channel_tab += 1;
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                        
+                                        // Switch to the appropriate view mode and load data
+                                        if let Some(channel_id) = &selected_channel_id {
+                                            match channel_tab {
+                                                0 => {
+                                                    view_mode = ViewMode::SubscriptionVideos;
+                                                    if !all_videos.is_empty() {
+                                                        let total_pages = calculate_total_pages(all_videos.len());
+                                                        status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                    }
+                                                }
+                                                1 => {
+                                                    view_mode = ViewMode::SubscriptionShorts;
+                                                    status_message = format!("Loading shorts from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                    let empty: Vec<Video> = Vec::new();
+                                                    terminal.draw(|f| ui_channel_with_tabs(f, &empty, &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, 1, 1, &log_message))?;
+                                                    
+                                                    if !all_shorts.is_empty() {
+                                                        let total_pages = calculate_total_pages(all_shorts.len());
+                                                        status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                    } else if !all_videos.is_empty() {
+                                                        // Videos were loaded, but shorts might not be separated yet
+                                                        let total_pages = calculate_total_pages(all_shorts.len());
+                                                        status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                    } else {
+                                                        match youtube_client.get_channel_videos_by_id(channel_id).await {
+                                                            Ok(new_videos) => {
+                                                                let (videos, shorts) = separate_videos_and_shorts(new_videos);
+                                                                all_videos = videos;
+                                                                all_shorts = shorts;
+                                                                let total_pages = calculate_total_pages(all_shorts.len());
+                                                                status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                                            }
+                                                            Err(e) => {
+                                                                status_message = format!("Error: {}", e);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                2 => {
+                                                    view_mode = ViewMode::SubscriptionPlaylists;
+                                                    status_message = format!("Loading playlists from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                    terminal.draw(|f| ui_channel_with_tabs(f, &[], &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, 1, 1, &log_message))?;
+                                                    
+                                                    match youtube_client.get_channel_playlists(channel_id).await {
+                                                        Ok(new_playlists) => {
+                                                            channel_playlists = new_playlists;
+                                                            if channel_playlists.is_empty() {
+                                                                status_message = format!("No playlists found for {}", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                            } else {
+                                                                playlist_list_state.select(Some(0));
+                                                                status_message = format!("Loaded {} playlists from {}", channel_playlists.len(), selected_channel_title.as_deref().unwrap_or("channel"));
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            status_message = format!("Error: {}", e);
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('1') if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts || view_mode == ViewMode::SubscriptionPlaylists => {
+                                    // Switch to Videos tab
+                                    if channel_tab != 0 {
+                                        channel_tab = 0;
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                        view_mode = ViewMode::SubscriptionVideos;
+                                        if !all_videos.is_empty() {
+                                            let total_pages = calculate_total_pages(all_videos.len());
+                                            status_message = format!("Loaded {} videos from {} (Page {}/{})", all_videos.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('2') if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts || view_mode == ViewMode::SubscriptionPlaylists => {
+                                    // Switch to Shorts tab
+                                    if channel_tab != 1 {
+                                        channel_tab = 1;
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                        view_mode = ViewMode::SubscriptionShorts;
+                                        if !all_shorts.is_empty() {
+                                            let total_pages = calculate_total_pages(all_shorts.len());
+                                            status_message = format!("Loaded {} shorts from {} (Page {}/{})", all_shorts.len(), selected_channel_title.as_deref().unwrap_or("channel"), current_page + 1, total_pages.max(1));
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('3') if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts || view_mode == ViewMode::SubscriptionPlaylists => {
+                                    // Switch to Playlists tab
+                                    if channel_tab != 2 {
+                                        channel_tab = 2;
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                        view_mode = ViewMode::SubscriptionPlaylists;
+                                        if let Some(channel_id) = &selected_channel_id {
+                                            status_message = format!("Loading playlists from {}...", selected_channel_title.as_deref().unwrap_or("channel"));
+                                            terminal.draw(|f| ui_channel_with_tabs(f, &[], &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, 1, 1, &log_message))?;
+                                            
+                                            match youtube_client.get_channel_playlists(channel_id).await {
+                                                Ok(new_playlists) => {
+                                                    channel_playlists = new_playlists;
+                                                    if channel_playlists.is_empty() {
+                                                        status_message = format!("No playlists found for {}", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                    } else {
+                                                        playlist_list_state.select(Some(0));
+                                                        status_message = format!("Loaded {} playlists from {}", channel_playlists.len(), selected_channel_title.as_deref().unwrap_or("channel"));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    status_message = format!("Error: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => {
                                     if let Some(selected) = video_list_state.selected() {
@@ -557,7 +843,35 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Char('n') | KeyCode::Right => {
+                                KeyCode::Char('n') | KeyCode::Right if view_mode != ViewMode::SubscriptionVideos && view_mode != ViewMode::SubscriptionShorts && view_mode != ViewMode::SubscriptionPlaylists => {
+                                    // Next page (only if not in channel tabs view)
+                                    let total_pages = calculate_total_pages(current_list.len());
+                                    if current_page < total_pages.saturating_sub(1) {
+                                        current_page += 1;
+                                        video_list_state.select(Some(0));
+                                        status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
+                                    }
+                                }
+                                KeyCode::Left if view_mode != ViewMode::SubscriptionVideos && view_mode != ViewMode::SubscriptionShorts && view_mode != ViewMode::SubscriptionPlaylists => {
+                                    // Previous page (only if not in channel tabs view)
+                                    if current_page > 0 {
+                                        current_page -= 1;
+                                        video_list_state.select(Some(0));
+                                        let total_pages = calculate_total_pages(current_list.len());
+                                        status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
+                                    }
+                                }
+                                KeyCode::Char('b') if view_mode != ViewMode::SubscriptionVideos && view_mode != ViewMode::SubscriptionShorts && view_mode != ViewMode::SubscriptionPlaylists && view_mode != ViewMode::PlaylistVideos => {
+                                    // Previous page (only if not going back to menu)
+                                    if current_page > 0 {
+                                        current_page -= 1;
+                                        video_list_state.select(Some(0));
+                                        let total_pages = calculate_total_pages(current_list.len());
+                                        status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
+                                    }
+                                }
+                                // Page navigation for channel tabs (when not switching tabs)
+                                KeyCode::Char('n') if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts => {
                                     // Next page
                                     let total_pages = calculate_total_pages(current_list.len());
                                     if current_page < total_pages.saturating_sub(1) {
@@ -566,17 +880,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
                                     }
                                 }
-                                KeyCode::Left => {
+                                KeyCode::Char('b') if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts => {
                                     // Previous page
-                                    if current_page > 0 {
-                                        current_page -= 1;
-                                        video_list_state.select(Some(0));
-                                        let total_pages = calculate_total_pages(current_list.len());
-                                        status_message = format!("Page {}/{}", current_page + 1, total_pages.max(1));
-                                    }
-                                }
-                                KeyCode::Char('b') if view_mode != ViewMode::SubscriptionVideos && view_mode != ViewMode::SubscriptionShorts && view_mode != ViewMode::PlaylistVideos => {
-                                    // Previous page (only if not going back to menu)
                                     if current_page > 0 {
                                         current_page -= 1;
                                         video_list_state.select(Some(0));
@@ -653,22 +958,43 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         status_message = "No active download to cancel".to_string();
                                     }
                                 }
-                                KeyCode::Char('r') => {
+                                KeyCode::Char('r') | KeyCode::Char('R') => {
                                     status_message = t("status_refreshing");
                                     let page_videos = get_current_page_videos(current_list, current_page);
                                     let total_pages = calculate_total_pages(current_list.len());
-                                    terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
+                                    if view_mode == ViewMode::SubscriptionVideos || view_mode == ViewMode::SubscriptionShorts || view_mode == ViewMode::SubscriptionPlaylists {
+                                        terminal.draw(|f| ui_channel_with_tabs(f, &page_videos, &mut video_list_state, selected_channel_title.as_deref().unwrap_or("Channel"), channel_tab, &status_message, current_page + 1, total_pages, &log_message))?;
+                                    } else {
+                                        terminal.draw(|f| ui_videos(f, &page_videos, &mut video_list_state, &status_message, current_page + 1, total_pages, &log_message))?;
+                                    }
                                     
                                     // Refresh based on current view
                                     let result = match view_mode {
                                         ViewMode::SubscriptionVideos | ViewMode::SubscriptionShorts => {
-                                            if let Some(selected) = subscription_list_state.selected() {
-                                                if selected < subscriptions.len() {
-                                                    let sub = &subscriptions[selected];
-                                                    youtube_client.get_channel_videos_by_id(&sub.channel_id).await
-                                                } else {
-                                                    continue;
+                                            if let Some(channel_id) = &selected_channel_id {
+                                                youtube_client.get_channel_videos_by_id(channel_id).await
+                                            } else {
+                                                continue;
+                                            }
+                                        }
+                                        ViewMode::SubscriptionPlaylists => {
+                                            if let Some(channel_id) = &selected_channel_id {
+                                                // Refresh playlists
+                                                match youtube_client.get_channel_playlists(channel_id).await {
+                                                    Ok(new_playlists) => {
+                                                        channel_playlists = new_playlists;
+                                                        if channel_playlists.is_empty() {
+                                                            status_message = format!("No playlists found for {}", selected_channel_title.as_deref().unwrap_or("channel"));
+                                                        } else {
+                                                            playlist_list_state.select(Some(0));
+                                                            status_message = format!("Loaded {} playlists from {}", channel_playlists.len(), selected_channel_title.as_deref().unwrap_or("channel"));
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        status_message = format!("Error: {}", e);
+                                                    }
                                                 }
+                                                continue;
                                             } else {
                                                 continue;
                                             }
@@ -874,7 +1200,7 @@ fn ui_channel_menu(f: &mut Frame, channel_name: &str, status: &str, log: &str) {
     f.render_widget(status_widget, chunks[3]);
 }
 
-fn ui_main_menu(f: &mut Frame, status: &str, log: &str) {
+fn ui_main_menu(f: &mut Frame, selection: usize, status: &str, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -892,14 +1218,22 @@ fn ui_main_menu(f: &mut Frame, status: &str, log: &str) {
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
 
-    // Menu options
-    let menu_items = vec![
-        Line::from(t("menu_subscriptions")),
-        Line::from(t("menu_playlists")),
-        Line::from(t("menu_channel")),
-        Line::from(""),
-        Line::from(t("menu_quit")),
-    ];
+    // Menu options with selection highlighting
+    let menu_items: Vec<Line> = (0..4)
+        .map(|i| {
+            let (text, style) = match i {
+                0 => (t("menu_subscriptions"), if selection == i { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
+                1 => (t("menu_playlists"), if selection == i { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
+                2 => (t("menu_channel"), if selection == i { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
+                3 => (t("menu_quit"), if selection == i { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
+                _ => (String::new(), Style::default()),
+            };
+            Line::from(vec![
+                Span::styled(if selection == i { "▶ " } else { "  " }, Style::default().fg(if selection == i { Color::Yellow } else { Color::White })),
+                Span::styled(text, style),
+            ])
+        })
+        .collect();
 
     let menu = Paragraph::new(menu_items)
         .style(Style::default().fg(Color::White))
@@ -1194,6 +1528,211 @@ fn ui_videos(f: &mut Frame, videos: &[Video], list_state: &mut ListState, status
     } else {
         "↑/↓/j/k: Navigate | p: Play | d: Download | c: Cancel | r: Refresh | Esc: Back | q: Quit"
     };
+    let status_text = format!("{} | {}", status, help_text);
+    let status_widget = Paragraph::new(status_text)
+        .style(Style::default().fg(Color::Green))
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    f.render_widget(status_widget, chunks[3]);
+}
+
+fn ui_channel_with_tabs(f: &mut Frame, videos: &[Video], list_state: &mut ListState, channel_name: &str, active_tab: usize, status: &str, current_page: usize, total_pages: usize, log: &str) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Title with tabs
+            Constraint::Min(0),     // Content
+            Constraint::Length(3), // Log
+            Constraint::Length(3), // Status
+        ])
+        .split(f.size());
+
+    // Title with tabs
+    let tabs = vec!["Videos", "Shorts", "Playlists"];
+    let mut tab_spans = Vec::new();
+    for (i, tab) in tabs.iter().enumerate() {
+        if i > 0 {
+            tab_spans.push(Span::raw(" | "));
+        }
+        let is_active = i == active_tab;
+        let style = if is_active {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        tab_spans.push(Span::styled(*tab, style));
+    }
+    let tab_line = Line::from(tab_spans);
+    
+    let title_text = if total_pages > 1 && active_tab != 2 {
+        format!("{} - {} (Page {}/{})", channel_name, tabs[active_tab], current_page, total_pages)
+    } else {
+        format!("{} - {}", channel_name, tabs[active_tab])
+    };
+    
+    let title = Paragraph::new(vec![
+        Line::from(tab_line),
+        Line::from(title_text),
+    ])
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, chunks[0]);
+
+    // Video list
+    let items: Vec<ListItem> = videos
+        .iter()
+        .enumerate()
+        .map(|(i, video)| {
+            let date = format_date(&video.published_at);
+            // Calculate global index: (current_page - 1) * 20 + local_index + 1
+            let global_index = (current_page - 1) * 20 + i + 1;
+            let content = vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("{}. ", global_index),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(
+                        &video.title,
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        &video.channel_title,
+                        Style::default().fg(Color::Blue),
+                    ),
+                    Span::raw(" • "),
+                    Span::styled(date, Style::default().fg(Color::Gray)),
+                ]),
+            ];
+            ListItem::new(content)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(tabs[active_tab]))
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(list, chunks[1], list_state);
+
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[2]);
+
+    // Status bar
+    let help_text = if active_tab == 2 {
+        "↑/↓/j/k: Navigate | Enter/Space: View Playlist | ←/→/1/2/3: Switch Tab | Esc: Back | q: Quit"
+    } else if total_pages > 1 {
+        "↑/↓/j/k: Navigate | p: Play | d: Download | c: Cancel | ←/→/1/2/3: Switch Tab | n/b: Page | r: Refresh | Esc: Back | q: Quit"
+    } else {
+        "↑/↓/j/k: Navigate | p: Play | d: Download | c: Cancel | ←/→/1/2/3: Switch Tab | r: Refresh | Esc: Back | q: Quit"
+    };
+    let status_text = format!("{} | {}", status, help_text);
+    let status_widget = Paragraph::new(status_text)
+        .style(Style::default().fg(Color::Green))
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    f.render_widget(status_widget, chunks[3]);
+}
+
+fn ui_channel_with_tabs_playlists(f: &mut Frame, playlists: &[Playlist], list_state: &mut ListState, channel_name: &str, active_tab: usize, status: &str, log: &str) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Title with tabs
+            Constraint::Min(0),     // Content
+            Constraint::Length(3), // Log
+            Constraint::Length(3), // Status
+        ])
+        .split(f.size());
+
+    // Title with tabs
+    let tabs = vec!["Videos", "Shorts", "Playlists"];
+    let mut tab_spans = Vec::new();
+    for (i, tab) in tabs.iter().enumerate() {
+        if i > 0 {
+            tab_spans.push(Span::raw(" | "));
+        }
+        let is_active = i == active_tab;
+        let style = if is_active {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        tab_spans.push(Span::styled(*tab, style));
+    }
+    let tab_line = Line::from(tab_spans);
+    
+    let title_text = format!("{} - {}", channel_name, tabs[active_tab]);
+    
+    let title = Paragraph::new(vec![
+        Line::from(tab_line),
+        Line::from(title_text),
+    ])
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, chunks[0]);
+
+    // Playlist list
+    let items: Vec<ListItem> = playlists
+        .iter()
+        .enumerate()
+        .map(|(i, playlist)| {
+            let content = vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("{}. ", i + 1),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(
+                        &playlist.title,
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{} videos", playlist.item_count),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]),
+            ];
+            ListItem::new(content)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(tabs[active_tab]))
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(list, chunks[1], list_state);
+
+    // Log output (pink box)
+    let log_text = if log.is_empty() { "Ready" } else { log };
+    let log_widget = Paragraph::new(log_text)
+        .style(Style::default().fg(Color::Magenta))
+        .block(Block::default().borders(Borders::ALL).title("yt-dlp Output"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(log_widget, chunks[2]);
+
+    // Status bar
+    let help_text = "↑/↓/j/k: Navigate | Enter/Space: View Playlist | ←/→/1/2/3: Switch Tab | Esc: Back | q: Quit";
     let status_text = format!("{} | {}", status, help_text);
     let status_widget = Paragraph::new(status_text)
         .style(Style::default().fg(Color::Green))
