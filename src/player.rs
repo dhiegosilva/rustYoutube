@@ -3,9 +3,152 @@ use anyhow::Result;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 // Format selector: prefer av01, then vp09, then anything else
 const FORMAT_SELECTOR: &str = "bestvideo[vcodec^=av01][height<=1080]+bestaudio/best[vcodec^=av01][height<=1080]/bestvideo[vcodec^=vp09][height<=1080]+bestaudio/best[vcodec^=vp09][height<=1080]/best[height<=1080]";
+
+// Helper: Get mpv command path
+async fn get_mpv_cmd() -> String {
+    #[cfg(windows)]
+    {
+        if let Some(local_mpv) = deps::get_mpv_path().await {
+            local_mpv.to_string_lossy().to_string()
+        } else {
+            "mpv.exe".to_string()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        "mpv".to_string()
+    }
+}
+
+// Helper: Get yt-dlp command path
+async fn get_ytdlp_path() -> String {
+    #[cfg(windows)]
+    {
+        if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
+            local_ytdlp.to_string_lossy().to_string()
+        } else {
+            "yt-dlp.exe".to_string()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        "yt-dlp".to_string()
+    }
+}
+
+// Helper: Capture output from stdout and send to log channel
+fn capture_output(
+    stream: Option<tokio::process::ChildStdout>,
+    log_tx: Option<mpsc::UnboundedSender<String>>,
+) {
+    if let Some(stdout) = stream {
+        let mut reader = BufReader::new(stdout);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Some(ref tx) = log_tx {
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+}
+
+// Helper: Capture stderr and send to log channel (simple version for downloads)
+fn capture_stderr_simple(
+    stderr: Option<tokio::process::ChildStderr>,
+    log_tx: Option<mpsc::UnboundedSender<String>>,
+) {
+    if let Some(stderr) = stderr {
+        let mut reader = BufReader::new(stderr);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Some(ref tx) = log_tx {
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+}
+
+// Helper: Capture stderr and collect it for error messages
+fn capture_stderr(
+    stderr: Option<tokio::process::ChildStderr>,
+    log_tx: Option<mpsc::UnboundedSender<String>>,
+) -> tokio::task::JoinHandle<Vec<u8>> {
+    let log_tx_stderr = log_tx.clone();
+    tokio::spawn(async move {
+        if let Some(stderr) = stderr {
+            let mut reader = BufReader::new(stderr);
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            lines.push(trimmed.to_string());
+                            if let Some(ref tx) = log_tx_stderr {
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            lines.join("\n").into_bytes()
+        } else {
+            Vec::new()
+        }
+    })
+}
+
+// Helper: Build mpv args with yt-dlp configuration
+async fn build_mpv_args_with_ytdlp(
+    caps: &HardwareCapabilities,
+    format_selector: Option<&str>,
+) -> Vec<String> {
+    let mut args = build_mpv_args(caps);
+    
+    // Configure mpv to use yt-dlp
+    let ytdlp_path = get_ytdlp_path().await;
+    args.push(format!("--script-opts=ytdl_hook-ytdl_path={}", ytdlp_path));
+    
+    // Set format selector if provided
+    if let Some(format) = format_selector {
+        args.push("--ytdl-format".to_string());
+        args.push(format.to_string());
+    }
+    
+    args
+}
 
 #[derive(Debug, Clone)]
 struct HardwareCapabilities {
@@ -38,20 +181,19 @@ async fn detect_hardware_capabilities(mpv_cmd: &str, log_tx: Option<mpsc::Unboun
         .await
     {
         let output_str = String::from_utf8_lossy(&output.stdout);
-        if output_str.contains("auto") || output_str.contains("auto-safe") {
-            hwdec_available.push("auto-safe".to_string());
-        }
-        if output_str.contains("d3d11va") {
-            hwdec_available.push("d3d11va".to_string());
-        }
-        if output_str.contains("nvdec") {
-            hwdec_available.push("nvdec".to_string());
-        }
-        if output_str.contains("vaapi") {
-            hwdec_available.push("vaapi".to_string());
-        }
-        if output_str.contains("videotoolbox") {
-            hwdec_available.push("videotoolbox".to_string());
+        let decoders = [
+            ("auto-safe", "auto-safe"),
+            ("auto", "auto-safe"),
+            ("d3d11va", "d3d11va"),
+            ("nvdec", "nvdec"),
+            ("vaapi", "vaapi"),
+            ("videotoolbox", "videotoolbox"),
+        ];
+        
+        for (search, decoder) in decoders.iter() {
+            if output_str.contains(search) && !hwdec_available.contains(&decoder.to_string()) {
+                hwdec_available.push(decoder.to_string());
+            }
         }
     }
     
@@ -72,9 +214,8 @@ async fn detect_hardware_capabilities(mpv_cmd: &str, log_tx: Option<mpsc::Unboun
 }
 
 // Build optimized mpv arguments based on hardware capabilities
-fn build_mpv_args(mpv_cmd: &str, caps: &HardwareCapabilities) -> String {
+fn build_mpv_args(caps: &HardwareCapabilities) -> Vec<String> {
     let mut args = vec![
-        mpv_cmd.to_string(),
         "--no-terminal".to_string(),
         "--really-quiet".to_string(),
     ];
@@ -82,17 +223,13 @@ fn build_mpv_args(mpv_cmd: &str, caps: &HardwareCapabilities) -> String {
     // Hardware acceleration
     if !caps.hwdec_available.is_empty() {
         // Prefer auto-safe, then platform-specific
-        let hwdec = if caps.hwdec_available.contains(&"auto-safe".to_string()) {
-            "auto-safe"
-        } else if caps.hwdec_available.contains(&"d3d11va".to_string()) {
-            "d3d11va"
-        } else if caps.hwdec_available.contains(&"nvdec".to_string()) {
-            "nvdec"
-        } else if caps.hwdec_available.contains(&"vaapi".to_string()) {
-            "vaapi"
-        } else {
-            caps.hwdec_available.first().map(|s| s.as_str()).unwrap_or("auto")
-        };
+        let hwdec = ["auto-safe", "d3d11va", "nvdec", "vaapi"]
+            .iter()
+            .find(|&decoder| caps.hwdec_available.contains(&decoder.to_string()))
+            .copied()
+            .or_else(|| caps.hwdec_available.first().map(|s| s.as_str()))
+            .unwrap_or("auto");
+        
         args.push(format!("--hwdec={}", hwdec));
         args.push("--hwdec-codecs=all".to_string());
     }
@@ -143,9 +280,8 @@ fn build_mpv_args(mpv_cmd: &str, caps: &HardwareCapabilities) -> String {
     // Common optimizations for all levels
     args.push("--target-prim=auto".to_string());
     args.push("--target-trc=auto".to_string());
-    args.push("--".to_string());
     
-    args.join(" ")
+    args
 }
 
 pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<String>>) -> Result<()> {
@@ -161,126 +297,47 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
         send_log("mpv not found, attempting to install...");
         deps::ensure_mpv().await?;
     }
+    // yt-dlp is still needed for mpv's built-in support
     if !deps::check_ytdlp().await {
         send_log("yt-dlp not found, attempting to install...");
         deps::ensure_ytdlp().await?;
     }
+    
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
     
     send_log(&format!("Preparing to play video: {}", video_id));
     
-    // Use yt-dlp with --exec to launch mpv directly
-    // This is more reliable and provides better feedback
-    
-    // Use local yt-dlp if available
-    #[cfg(windows)]
-    let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
-        local_ytdlp
-    } else {
-        std::path::PathBuf::from("yt-dlp.exe")
-    };
-    #[cfg(not(windows))]
-    let ytdlp_cmd = std::path::PathBuf::from("yt-dlp");
-    
-    // Use local mpv if available
-    #[cfg(windows)]
-    let mpv_cmd = if let Some(local_mpv) = deps::get_mpv_path().await {
-        local_mpv.to_string_lossy().to_string()
-    } else {
-        "mpv.exe".to_string()
-    };
-    #[cfg(not(windows))]
-    let mpv_cmd = "mpv".to_string();
+    let mpv_cmd = get_mpv_cmd().await;
     
     // Detect hardware capabilities
     send_log("Detecting hardware capabilities...");
     let caps = detect_hardware_capabilities(&mpv_cmd, log_tx.clone()).await;
     
-    // Build optimized mpv command
-    let exec_cmd = build_mpv_args(&mpv_cmd, &caps);
     send_log(&format!("Using optimized settings: {:?}", caps.performance_level));
     
-    // Use --exec to launch mpv directly with progress output
-    send_log("Fetching video stream with yt-dlp (preferring av01 > vp09 > other)...");
+    // Build mpv arguments with yt-dlp config and AV01 format preference
+    let mut mpv_args = build_mpv_args_with_ytdlp(&caps, Some(FORMAT_SELECTOR)).await;
     
-    let mut ytdlp = TokioCommand::new(&ytdlp_cmd)
-        .arg("--format")
-        .arg(FORMAT_SELECTOR)
-        .arg("--no-playlist")
-        .arg("--progress")
-        .arg("--newline")
-        .arg("--exec")
-        .arg(&exec_cmd)
-        .arg(&url)
+    // Add the YouTube URL
+    mpv_args.push(url);
+    
+    send_log("Streaming video with mpv (preferring av01 > vp09 > other)...");
+    
+    let mut mpv = TokioCommand::new(&mpv_cmd)
+        .args(&mpv_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     
-    // Capture and print yt-dlp output in real-time
-    let log_tx_stdout = log_tx.clone();
-    if let Some(stdout) = ytdlp.stdout.take() {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut reader = BufReader::new(stdout);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Some(ref tx) = log_tx_stdout {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-    
-    // Collect stderr output for better error messages
-    let mut stderr_output = Vec::new();
-    let stderr_handle = if let Some(stderr) = ytdlp.stderr.take() {
-        let log_tx_stderr = log_tx.clone();
-        Some(tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut reader = BufReader::new(stderr);
-            let mut lines = Vec::new();
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            lines.push(trimmed.to_string());
-                            if let Some(ref tx) = log_tx_stderr {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            lines.join("\n").into_bytes()
-        }))
-    } else {
-        None
-    };
+    // Capture output streams
+    capture_output(mpv.stdout.take(), log_tx.clone());
+    let stderr_handle = capture_stderr(mpv.stderr.take(), log_tx.clone());
     
     send_log("Starting mpv player...");
-    let status = ytdlp.wait().await?;
+    let status = mpv.wait().await?;
     
     // Get stderr output if available
-    if let Some(handle) = stderr_handle {
-        if let Ok(output) = handle.await {
-            stderr_output = output;
-        }
-    }
+    let stderr_output = stderr_handle.await.unwrap_or_default();
     
     if !status.success() {
         let exit_code = status.code();
@@ -288,7 +345,7 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
         
         // Provide more helpful error messages based on exit code
         let user_friendly_error = match exit_code {
-            Some(120) => {
+            Some(1) | Some(2) => {
                 if error_msg.contains("HTTP Error 403") || error_msg.contains("Forbidden") {
                     "Video is private or unavailable. Try a different video."
                 } else if error_msg.contains("timeout") || error_msg.contains("Connection") {
@@ -299,15 +356,13 @@ pub async fn play_video(video_id: &str, log_tx: Option<mpsc::UnboundedSender<Str
                     "Video playback failed. This might be due to network issues or video unavailability."
                 }
             }
-            Some(1) => "General error occurred. Check the error messages above.",
-            Some(2) => "yt-dlp argument error. This is a bug, please report it.",
             _ => "Unknown error occurred during video playback.",
         };
         
         send_log(&format!("Error: {} (Exit code: {:?})", user_friendly_error, exit_code));
         
-        // For exit code 120 (format/network issues), try fallback format
-        if exit_code == Some(120) && (error_msg.contains("format") || error_msg.contains("No video formats") || error_msg.is_empty()) {
+        // Try fallback format if format selection failed
+        if error_msg.contains("format") || error_msg.contains("No video formats") || error_msg.is_empty() {
             send_log("Retrying with fallback format (best available)...");
             return play_video_fallback_format(video_id, log_tx).await;
         }
@@ -333,105 +388,33 @@ async fn play_video_fallback_format(video_id: &str, log_tx: Option<mpsc::Unbound
     };
     
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
-    
-    #[cfg(windows)]
-    let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
-        local_ytdlp
-    } else {
-        std::path::PathBuf::from("yt-dlp.exe")
-    };
-    #[cfg(not(windows))]
-    let ytdlp_cmd = std::path::PathBuf::from("yt-dlp");
-    
-    #[cfg(windows)]
-    let mpv_cmd = if let Some(local_mpv) = deps::get_mpv_path().await {
-        local_mpv.to_string_lossy().to_string()
-    } else {
-        "mpv.exe".to_string()
-    };
-    #[cfg(not(windows))]
-    let mpv_cmd = "mpv".to_string();
+    let mpv_cmd = get_mpv_cmd().await;
     
     // Use simpler format selector as fallback
     let fallback_format = "best[height<=1080]/best";
     send_log(&format!("Trying fallback format: {}", fallback_format));
     
-    let mut ytdlp = TokioCommand::new(&ytdlp_cmd)
-        .arg("--format")
-        .arg(fallback_format)
-        .arg("--no-playlist")
-        .arg("--progress")
-        .arg("--newline")
-        .arg("--exec")
-        .arg(&format!("{} --no-terminal --really-quiet --", mpv_cmd))
-        .arg(&url)
+    // Get hardware caps for basic args
+    let caps = detect_hardware_capabilities(&mpv_cmd, log_tx.clone()).await;
+    let mut mpv_args = build_mpv_args_with_ytdlp(&caps, Some(fallback_format)).await;
+    mpv_args.push(url);
+    
+    let mut mpv = TokioCommand::new(&mpv_cmd)
+        .args(&mpv_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     
-    // Capture output
-    let log_tx_stdout = log_tx.clone();
-    if let Some(stdout) = ytdlp.stdout.take() {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut reader = BufReader::new(stdout);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Some(ref tx) = log_tx_stdout {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    // Capture output streams
+    capture_output(mpv.stdout.take(), log_tx.clone());
+    capture_stderr(mpv.stderr.take(), log_tx.clone());
     
-    let log_tx_stderr = log_tx.clone();
-    if let Some(stderr) = ytdlp.stderr.take() {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut reader = BufReader::new(stderr);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Some(ref tx) = log_tx_stderr {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-    
-    let status = ytdlp.wait().await?;
+    let status = mpv.wait().await?;
     
     if !status.success() {
-        let exit_code = status.code();
         // Try final fallback with just 'best'
-        if exit_code == Some(120) {
-            send_log("Fallback format failed, trying basic 'best' format...");
-            return play_video_final_fallback(video_id, log_tx).await;
-        }
-        send_log(&format!("Fallback also failed with exit code: {:?}", exit_code));
-        return Err(anyhow::anyhow!(
-            "Video playback failed even with fallback format.\nExit code: {:?}\nThe video might be unavailable or your network connection is having issues.",
-            exit_code
-        ));
+        send_log("Fallback format failed, trying basic 'best' format...");
+        return play_video_final_fallback(video_id, log_tx).await;
     }
     
     send_log("Video playback completed (using fallback format).");
@@ -447,89 +430,27 @@ async fn play_video_final_fallback(video_id: &str, log_tx: Option<mpsc::Unbounde
     };
     
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let mpv_cmd = get_mpv_cmd().await;
     
-    #[cfg(windows)]
-    let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
-        local_ytdlp
-    } else {
-        std::path::PathBuf::from("yt-dlp.exe")
-    };
-    #[cfg(not(windows))]
-    let ytdlp_cmd = std::path::PathBuf::from("yt-dlp");
+    // Use mpv default format (most compatible) - don't specify --ytdl-format
+    send_log("Trying final fallback: using mpv default format (most compatible)...");
     
-    #[cfg(windows)]
-    let mpv_cmd = if let Some(local_mpv) = deps::get_mpv_path().await {
-        local_mpv.to_string_lossy().to_string()
-    } else {
-        "mpv.exe".to_string()
-    };
-    #[cfg(not(windows))]
-    let mpv_cmd = "mpv".to_string();
+    // Get hardware caps for basic args
+    let caps = detect_hardware_capabilities(&mpv_cmd, log_tx.clone()).await;
+    let mut mpv_args = build_mpv_args_with_ytdlp(&caps, None).await;
+    mpv_args.push(url);
     
-    // Use yt-dlp default format (most compatible) - don't specify --format at all
-    send_log("Trying final fallback: using yt-dlp default format (most compatible)...");
-    
-    let mut ytdlp = TokioCommand::new(&ytdlp_cmd)
-        .arg("--no-playlist")
-        .arg("--progress")
-        .arg("--newline")
-        .arg("--exec")
-        .arg(&format!("{} --no-terminal --really-quiet --", mpv_cmd))
-        .arg(&url)
+    let mut mpv = TokioCommand::new(&mpv_cmd)
+        .args(&mpv_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     
-    // Capture output
-    let log_tx_stdout = log_tx.clone();
-    if let Some(stdout) = ytdlp.stdout.take() {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut reader = BufReader::new(stdout);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Some(ref tx) = log_tx_stdout {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    // Capture output streams
+    capture_output(mpv.stdout.take(), log_tx.clone());
+    capture_stderr(mpv.stderr.take(), log_tx.clone());
     
-    let log_tx_stderr = log_tx.clone();
-    if let Some(stderr) = ytdlp.stderr.take() {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut reader = BufReader::new(stderr);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Some(ref tx) = log_tx_stderr {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-    
-    let status = ytdlp.wait().await?;
+    let status = mpv.wait().await?;
     
     if !status.success() {
         let exit_code = status.code();
@@ -540,7 +461,7 @@ async fn play_video_final_fallback(video_id: &str, log_tx: Option<mpsc::Unbounde
         ));
     }
     
-    send_log("Video playback completed (using yt-dlp default format).");
+    send_log("Video playback completed (using mpv default format).");
     Ok(())
 }
 
@@ -598,53 +519,8 @@ pub async fn download_video(
     }
 
     // Capture and print output in real-time
-    let log_tx_stdout = log_tx.clone();
-    if let Some(stdout) = stdout {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut reader = BufReader::new(stdout);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Some(ref tx) = log_tx_stdout {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-    
-    let log_tx_stderr = log_tx.clone();
-    if let Some(stderr) = stderr {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut reader = BufReader::new(stderr);
-        tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Some(ref tx) = log_tx_stderr {
-                                let _ = tx.send(trimmed.to_string());
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    capture_output(stdout, log_tx.clone());
+    capture_stderr_simple(stderr, log_tx.clone());
 
     // Wait for download to complete
     let status = if let Some(ref handle_storage) = &handle_storage {
