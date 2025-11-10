@@ -59,12 +59,48 @@ fn detect_language() -> String {
     {
         use std::env;
         if let Ok(lang) = env::var("LANG") {
+            if lang.starts_with("pt_BR") || lang.starts_with("pt-BR") {
+                return "pt-br".to_string();
+            }
+            if lang.starts_with("es_ES") || lang.starts_with("es-ES") {
+                return "es".to_string();
+            }
+            if lang.starts_with("fr_FR") || lang.starts_with("fr-FR") {
+                return "fr".to_string();
+            }
+            if lang.starts_with("pt") {
+                return "pt-br".to_string();
+            }
+            if lang.starts_with("es") {
+                return "es".to_string();
+            }
+            if lang.starts_with("fr") {
+                return "fr".to_string();
+            }
             if lang.starts_with("de") {
                 return "de".to_string();
             }
         }
         // Try Windows locale
         if let Ok(locale) = env::var("LOCALE") {
+            if locale.starts_with("pt_BR") || locale.starts_with("pt-BR") {
+                return "pt-br".to_string();
+            }
+            if locale.starts_with("es_ES") || locale.starts_with("es-ES") {
+                return "es".to_string();
+            }
+            if locale.starts_with("fr_FR") || locale.starts_with("fr-FR") {
+                return "fr".to_string();
+            }
+            if locale.starts_with("pt") {
+                return "pt-br".to_string();
+            }
+            if locale.starts_with("es") {
+                return "es".to_string();
+            }
+            if locale.starts_with("fr") {
+                return "fr".to_string();
+            }
             if locale.starts_with("de") {
                 return "de".to_string();
             }
@@ -75,6 +111,24 @@ fn detect_language() -> String {
     {
         use std::env;
         if let Ok(lang) = env::var("LANG") {
+            if lang.starts_with("pt_BR") || lang.starts_with("pt-BR") {
+                return "pt-br".to_string();
+            }
+            if lang.starts_with("es_ES") || lang.starts_with("es-ES") {
+                return "es".to_string();
+            }
+            if lang.starts_with("fr_FR") || lang.starts_with("fr-FR") {
+                return "fr".to_string();
+            }
+            if lang.starts_with("pt") {
+                return "pt-br".to_string();
+            }
+            if lang.starts_with("es") {
+                return "es".to_string();
+            }
+            if lang.starts_with("fr") {
+                return "fr".to_string();
+            }
             if lang.starts_with("de") {
                 return "de".to_string();
             }
