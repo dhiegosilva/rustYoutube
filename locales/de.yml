@@ -1,0 +1,58 @@
+de:
+  app_title: "YouTube Terminal Client"
+  main_menu_title: "Hauptmenü"
+  subscriptions_title: "Abonnements"
+  playlists_title: "Wiedergabelisten"
+  videos_title: "Videos"
+  channel_input_title: "Kanal nach URL durchsuchen"
+  
+  menu_subscriptions: "s - Abonnements"
+  menu_playlists: "p - Wiedergabelisten"
+  menu_channel: "c - Kanal nach URL durchsuchen"
+  menu_quit: "q - Beenden"
+  
+  status_welcome: "Willkommen! Drücken Sie 's' für Abonnements, 'p' für Wiedergabelisten, 'c' für Kanal"
+  status_loading_videos: "Videos werden geladen..."
+  status_loading_subscriptions: "Abonnements werden geladen..."
+  status_loading_playlists: "Wiedergabelisten werden geladen..."
+  status_no_subscriptions: "Keine Abonnements gefunden. Stellen Sie sicher, dass Sie Kanäle auf YouTube abonniert haben."
+  status_loaded_videos: "%{count} Videos geladen"
+  status_loaded_subscriptions: "%{count} Abonnements geladen"
+  status_loaded_playlists: "%{count} Wiedergabelisten geladen"
+  status_playing: "Wiedergabe: %{title}"
+  status_downloading: "Herunterladen: %{title}"
+  status_refreshing: "Aktualisiere..."
+  status_page_info: "Seite %{current}/%{total}"
+  
+  error_not_authenticated: "Nicht authentifiziert. Bitte überprüfen Sie Ihre Anmeldedaten."
+  error_loading_videos: "Fehler beim Laden der Videos"
+  error_loading_subscriptions: "Fehler beim Laden der Abonnements"
+  error_loading_playlists: "Fehler beim Laden der Wiedergabelisten"
+  
+  help_navigate: "↑/↓/j/k: Navigieren"
+  help_select: "Enter/Leertaste: Auswählen"
+  help_play: "p: Abspielen"
+  help_download: "d: Herunterladen"
+  help_refresh: "r: Aktualisieren"
+  help_back: "Esc: Zurück"
+  help_quit: "q: Beenden"
+  help_page_nav: "←/→: Vorherige/Nächste Seite"
+  help_url_example: "Beispiele: https://www.youtube.com/@channelname/videos"
+  help_press_enter: "Enter drücken zum Laden"
+  
+  video_unknown_date: "Unbekanntes Datum"
+  video_today: "Heute"
+  video_days_ago: "vor %{count} Tag(en)"
+  video_months_ago: "vor %{count} Monat(en)"
+  video_years_ago: "vor %{count} Jahr(en)"
+  
+  channel_input_placeholder: "YouTube-Kanal-URL hier eingeben..."
+  channel_input_help: "%{examples} | %{enter} | %{back} | %{quit}"
+  
+  list_subscriptions: "Abonnements"
+  list_playlists: "Wiedergabelisten"
+  list_videos: "Videos"
+  list_videos_paginated: "Videos (Seite %{current}/%{total})"
+  
+  playlist_video_count: "%{count} Videos"
+

@@ -124,3 +124,34 @@ async fn play_video_fallback(url: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn download_video(video_id: &str) -> Result<()> {
+    // Ensure yt-dlp is available
+    if !deps::check_ytdlp().await {
+        deps::ensure_ytdlp().await?;
+    }
+    
+    let url = format!("https://www.youtube.com/watch?v={}", video_id);
+    
+    // Use local yt-dlp if available
+    #[cfg(windows)]
+    let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
+        local_ytdlp.to_str().unwrap().to_string()
+    } else {
+        "yt-dlp.exe".to_string()
+    };
+    #[cfg(not(windows))]
+    let ytdlp_cmd = "yt-dlp";
+    
+    // Download video with best quality
+    let mut download = TokioCommand::new(&ytdlp_cmd)
+        .arg("--format")
+        .arg("best[height<=1080]/best")
+        .arg("--output")
+        .arg("%(title)s.%(ext)s")
+        .arg(&url)
+        .spawn()?;
+
+    download.wait().await?;
+    Ok(())
+}
+
