@@ -1,19 +1,17 @@
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
 use serde_yaml::Value;
+use std::collections::HashMap;
 use std::fs;
 
-static TRANSLATIONS: Lazy<HashMap<String, String>> = Lazy::new(|| {
-    load_translations()
-});
+static TRANSLATIONS: Lazy<HashMap<String, String>> = Lazy::new(|| load_translations());
 
 fn load_translations() -> HashMap<String, String> {
     let mut translations = HashMap::new();
-    
+
     // Detect OS language
     let lang = detect_language();
     let locale_file = format!("locales/{}.yml", lang);
-    
+
     // Try to load the detected language, fallback to English
     if let Ok(content) = fs::read_to_string(&locale_file) {
         if let Ok(yaml) = serde_yaml::from_str::<Value>(&content) {
@@ -30,7 +28,7 @@ fn load_translations() -> HashMap<String, String> {
             }
         }
     }
-    
+
     // If no translations loaded, try English as fallback
     if translations.is_empty() {
         if let Ok(content) = fs::read_to_string("locales/en.yml") {
@@ -49,7 +47,7 @@ fn load_translations() -> HashMap<String, String> {
             }
         }
     }
-    
+
     translations
 }
 
@@ -106,7 +104,7 @@ fn detect_language() -> String {
             }
         }
     }
-    
+
     #[cfg(not(windows))]
     {
         use std::env;
@@ -134,19 +132,20 @@ fn detect_language() -> String {
             }
         }
     }
-    
+
     "en".to_string() // Default to English
 }
 
 pub fn t(key: &str) -> String {
-    TRANSLATIONS.get(key)
+    TRANSLATIONS
+        .get(key)
         .cloned()
         .unwrap_or_else(|| key.to_string())
 }
 
 pub fn t_with_args(key: &str, args: &[(&str, &str)]) -> String {
     let mut result = t(key);
-    
+
     // Replace placeholders
     for (k, v) in args {
         result = result.replace(&format!("%{{{}}}", k), v);

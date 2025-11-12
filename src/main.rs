@@ -1,9 +1,9 @@
-mod youtube;
-mod ui;
-mod player;
-mod deps;
 mod auth;
+mod deps;
 mod i18n;
+mod player;
+mod ui;
+mod youtube;
 
 use anyhow::Result;
 
@@ -11,9 +11,8 @@ use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    
     println!("Checking dependencies...");
-    
+
     // Ensure mpv and yt-dlp are installed
     if let Err(e) = deps::ensure_dependencies().await {
         eprintln!("Warning: {}", e);
@@ -25,7 +24,7 @@ async fn main() -> Result<()> {
         use std::io::Write;
         std::io::stdout().flush().ok();
     }
-    
+
     // Initialize auth client
     let auth_client = match auth::AuthClient::new() {
         Ok(client) => client,
@@ -42,7 +41,7 @@ async fn main() -> Result<()> {
             return Err(e);
         }
     };
-    
+
     // Authenticate (or load existing token)
     println!("Authenticating with YouTube...");
     let access_token = match auth_client.get_access_token().await {
@@ -55,18 +54,17 @@ async fn main() -> Result<()> {
             return Err(e);
         }
     };
-    
+
     // Initialize YouTube client with authentication
     let http_client = reqwest::Client::new();
     let youtube_client = youtube::YouTubeClient::with_auth(http_client, access_token);
-    
+
     // Run the UI
     println!("Starting UI...");
     if let Err(e) = ui::run(youtube_client).await {
         eprintln!("Error running UI: {}", e);
         return Err(e);
     }
-    
+
     Ok(())
 }
-

@@ -34,7 +34,6 @@ pub struct YouTubeClient {
 }
 
 impl YouTubeClient {
-
     pub fn with_auth(client: Client, access_token: String) -> Self {
         Self {
             client: Some(client),
@@ -48,7 +47,7 @@ impl YouTubeClient {
 
     pub async fn get_channel_videos(&self, channel_url: &str) -> Result<Vec<Video>> {
         use crate::deps;
-        
+
         // Check if yt-dlp is available, try to install if not
         if !deps::check_ytdlp().await {
             println!("yt-dlp not found. Attempting to install...");
@@ -69,7 +68,7 @@ impl YouTubeClient {
                 ));
             }
         }
-        
+
         // Use yt-dlp to get channel videos - prefer local version if available
         #[cfg(windows)]
         let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
@@ -79,7 +78,7 @@ impl YouTubeClient {
         };
         #[cfg(not(windows))]
         let ytdlp_cmd = "yt-dlp";
-        
+
         // Normalize the URL - ensure it's a full YouTube URL
         let normalized_url = if channel_url.starts_with("http") {
             channel_url.to_string()
@@ -88,15 +87,17 @@ impl YouTubeClient {
         } else {
             format!("https://www.youtube.com/{}", channel_url)
         };
-        
+
         println!("Fetching videos from: {}", normalized_url);
-        
+
         // Use yt-dlp to get channel videos
         let output = TokioCommand::new(ytdlp_cmd)
             .args(&[
                 "--flat-playlist",
-                "--print", "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
-                "--playlist-end", "20", // Get top 20 videos
+                "--print",
+                "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
+                "--playlist-end",
+                "20", // Get top 20 videos
                 &normalized_url,
             ])
             .output()
@@ -119,7 +120,7 @@ impl YouTubeClient {
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             // Check if it's a "not found" error
             if error.contains("not found") || error.contains("not recognized") || error.is_empty() {
                 return Err(anyhow::anyhow!(
@@ -129,7 +130,7 @@ impl YouTubeClient {
                     Or run the program again to auto-install."
                 ));
             }
-            
+
             return Err(anyhow::anyhow!(
                 "Failed to get channel videos.\nError: {}\nOutput: {}",
                 error,
@@ -140,31 +141,34 @@ impl YouTubeClient {
         self.parse_ytdlp_output(&output.stdout).await
     }
 
-
-
     async fn parse_ytdlp_output(&self, output: &[u8]) -> Result<Vec<Video>> {
         let mut videos = Vec::new();
         let output_str = String::from_utf8_lossy(output);
-        
+
         for line in output_str.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            
+
             let parts: Vec<&str> = line.split('|').collect();
             if parts.len() >= 4 {
                 let id = parts[0].to_string();
                 let title = parts[1].to_string();
                 let uploader = parts[2].to_string();
                 let upload_date = parts.get(3).unwrap_or(&"").to_string();
-                
+
                 // Format date
                 let formatted_date = if upload_date.len() >= 8 {
-                    format!("{}-{}-{}", &upload_date[0..4], &upload_date[4..6], &upload_date[6..8])
+                    format!(
+                        "{}-{}-{}",
+                        &upload_date[0..4],
+                        &upload_date[4..6],
+                        &upload_date[6..8]
+                    )
                 } else {
                     upload_date
                 };
-                
+
                 videos.push(Video {
                     id,
                     title,
@@ -174,7 +178,7 @@ impl YouTubeClient {
                 });
             }
         }
-        
+
         Ok(videos)
     }
 
@@ -192,11 +196,7 @@ impl YouTubeClient {
                 url.push_str(&format!("&pageToken={}", token));
             }
 
-            let response = client
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await?;
+            let response = client.get(&url).bearer_auth(token).send().await?;
 
             if !response.status().is_success() {
                 let error_text = response.text().await?;
@@ -204,8 +204,13 @@ impl YouTubeClient {
             }
 
             let response_text = response.text().await?;
-            let data: SubscriptionResponse = serde_json::from_str(&response_text)
-                .map_err(|e| anyhow::anyhow!("Failed to parse subscription response: {}\nResponse: {}", e, response_text))?;
+            let data: SubscriptionResponse = serde_json::from_str(&response_text).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse subscription response: {}\nResponse: {}",
+                    e,
+                    response_text
+                )
+            })?;
 
             let items_count = data.items.len();
             for item in data.items {
@@ -217,13 +222,19 @@ impl YouTubeClient {
                     });
                 } else {
                     // Log warning for items without resource_id
-                    eprintln!("Warning: Subscription item missing resource_id: {:?}", item.snippet.title);
+                    eprintln!(
+                        "Warning: Subscription item missing resource_id: {:?}",
+                        item.snippet.title
+                    );
                 }
             }
-            
+
             // If we got items but none had resource_id, log warning
             if items_count > 0 && subscriptions.is_empty() {
-                eprintln!("Warning: Received {} subscription items but none had resource_id", items_count);
+                eprintln!(
+                    "Warning: Received {} subscription items but none had resource_id",
+                    items_count
+                );
             }
 
             page_token = data.next_page_token;
@@ -234,7 +245,6 @@ impl YouTubeClient {
 
         Ok(subscriptions)
     }
-
 
     // Get playlists
     pub async fn get_playlists(&self) -> Result<Vec<Playlist>> {
@@ -250,11 +260,7 @@ impl YouTubeClient {
                 url.push_str(&format!("&pageToken={}", token));
             }
 
-            let response = client
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await?;
+            let response = client.get(&url).bearer_auth(token).send().await?;
 
             if !response.status().is_success() {
                 let error_text = response.text().await?;
@@ -262,11 +268,17 @@ impl YouTubeClient {
             }
 
             let response_text = response.text().await?;
-            let data: PlaylistResponse = serde_json::from_str(&response_text)
-                .map_err(|e| anyhow::anyhow!("Failed to parse playlist response: {}\nResponse: {}", e, response_text))?;
+            let data: PlaylistResponse = serde_json::from_str(&response_text).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse playlist response: {}\nResponse: {}",
+                    e,
+                    response_text
+                )
+            })?;
 
             for item in data.items {
-                let item_count = item.content_details
+                let item_count = item
+                    .content_details
                     .as_ref()
                     .map(|cd| cd.item_count)
                     .unwrap_or(0);
@@ -301,11 +313,7 @@ impl YouTubeClient {
                 url.push_str(&format!("&pageToken={}", token));
             }
 
-            let response = client
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await?;
+            let response = client.get(&url).bearer_auth(token).send().await?;
 
             if !response.status().is_success() {
                 let error_text = response.text().await?;
@@ -313,8 +321,14 @@ impl YouTubeClient {
             }
 
             let response_text = response.text().await?;
-            let data: PlaylistItemsResponse = serde_json::from_str(&response_text)
-                .map_err(|e| anyhow::anyhow!("Failed to parse playlist items response: {}\nResponse: {}", e, response_text))?;
+            let data: PlaylistItemsResponse =
+                serde_json::from_str(&response_text).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to parse playlist items response: {}\nResponse: {}",
+                        e,
+                        response_text
+                    )
+                })?;
 
             for item in data.items {
                 // Try to get video ID from content_details first, then from resourceId
@@ -325,18 +339,29 @@ impl YouTubeClient {
                 } else {
                     None
                 };
-                
+
                 if let Some(vid_id) = video_id {
                     videos.push(Video {
                         id: vid_id,
                         title: item.snippet.title.clone(),
-                        channel_title: item.snippet.channel_title.clone().unwrap_or_else(|| "Unknown Channel".to_string()),
-                        published_at: item.snippet.published_at.clone().unwrap_or_else(|| "Unknown date".to_string()),
+                        channel_title: item
+                            .snippet
+                            .channel_title
+                            .clone()
+                            .unwrap_or_else(|| "Unknown Channel".to_string()),
+                        published_at: item
+                            .snippet
+                            .published_at
+                            .clone()
+                            .unwrap_or_else(|| "Unknown date".to_string()),
                         thumbnail_url: item.snippet.thumbnails.default.url.clone(),
                     });
                 } else {
                     // If we can't get video ID, skip this item
-                    eprintln!("Warning: Playlist item missing video ID, skipping: {}", item.snippet.title);
+                    eprintln!(
+                        "Warning: Playlist item missing video ID, skipping: {}",
+                        item.snippet.title
+                    );
                 }
             }
 
@@ -355,12 +380,11 @@ impl YouTubeClient {
         let token = self.access_token.as_ref().context("Not authenticated")?;
 
         // Get uploads playlist ID
-        let url = format!("https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id={}", channel_id);
-        let response = client
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await?;
+        let url = format!(
+            "https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id={}",
+            channel_id
+        );
+        let response = client.get(&url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("Failed to get channel info"));
@@ -389,11 +413,7 @@ impl YouTubeClient {
                 url.push_str(&format!("&pageToken={}", token));
             }
 
-            let response = client
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await?;
+            let response = client.get(&url).bearer_auth(token).send().await?;
 
             if !response.status().is_success() {
                 let error_text = response.text().await?;
@@ -401,11 +421,17 @@ impl YouTubeClient {
             }
 
             let response_text = response.text().await?;
-            let data: PlaylistResponse = serde_json::from_str(&response_text)
-                .map_err(|e| anyhow::anyhow!("Failed to parse playlist response: {}\nResponse: {}", e, response_text))?;
+            let data: PlaylistResponse = serde_json::from_str(&response_text).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse playlist response: {}\nResponse: {}",
+                    e,
+                    response_text
+                )
+            })?;
 
             for item in data.items {
-                let item_count = item.content_details
+                let item_count = item
+                    .content_details
                     .as_ref()
                     .map(|cd| cd.item_count)
                     .unwrap_or(0);
@@ -431,7 +457,7 @@ impl YouTubeClient {
     // We try multiple methods to get trending/popular videos.
     pub async fn get_recommendations(&self) -> Result<Vec<Video>> {
         use crate::deps;
-        
+
         // First, try using authenticated API if available (for personalized recommendations)
         if self.is_authenticated() {
             if let Ok(videos) = self.get_recommendations_via_api().await {
@@ -440,14 +466,14 @@ impl YouTubeClient {
                 }
             }
         }
-        
+
         // Check if yt-dlp is available
         if !deps::check_ytdlp().await {
             if let Err(e) = deps::ensure_ytdlp().await {
                 return Err(anyhow::anyhow!("yt-dlp is not installed: {}", e));
             }
         }
-        
+
         #[cfg(windows)]
         let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
             local_ytdlp.to_str().unwrap().to_string()
@@ -456,13 +482,16 @@ impl YouTubeClient {
         };
         #[cfg(not(windows))]
         let ytdlp_cmd = "yt-dlp";
-        
+
         // Try multiple methods to get trending/popular videos
         // YouTube feeds don't work well with yt-dlp, so we use alternative approaches
         // Note: YouTube's homepage requires JavaScript, so we use trending/popular content instead
         let methods: Vec<(&str, Vec<&str>)> = vec![
             // Method 1: Use trending URL with web client (most reliable)
-            ("https://www.youtube.com/feed/trending", vec!["--extractor-args", "youtube:player_client=web"]),
+            (
+                "https://www.youtube.com/feed/trending",
+                vec!["--extractor-args", "youtube:player_client=web"],
+            ),
             // Method 2: Use trending URL without extra args
             ("https://www.youtube.com/feed/trending", vec![]),
             // Method 3: Use a popular channel's videos as fallback (MrBeast)
@@ -470,24 +499,23 @@ impl YouTubeClient {
             // Method 4: Try another popular channel (PewDiePie)
             ("https://www.youtube.com/@PewDiePie/videos", vec![]),
         ];
-        
+
         let mut last_error = None;
-        
+
         for (url, extra_args) in methods {
             let mut args = vec![
                 "--flat-playlist",
-                "--print", "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
-                "--playlist-end", "50",
+                "--print",
+                "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
+                "--playlist-end",
+                "50",
                 "--no-warnings",
             ];
             args.extend(extra_args);
             args.push(url);
-            
-            let result = TokioCommand::new(&ytdlp_cmd)
-                .args(&args)
-                .output()
-                .await;
-            
+
+            let result = TokioCommand::new(&ytdlp_cmd).args(&args).output().await;
+
             match result {
                 Ok(cmd_output) if cmd_output.status.success() => {
                     let stdout_str = String::from_utf8_lossy(&cmd_output.stdout);
@@ -510,25 +538,25 @@ impl YouTubeClient {
                 }
             }
         }
-        
+
         // If all methods failed, return a helpful error
         Err(anyhow::anyhow!(
             "Could not fetch recommendations.\n\nYouTube's personalized homepage requires authentication and JavaScript rendering.\nTrending feeds may not be available in your region.\n\nSuggestions:\n- Use 'Search' to find videos\n- Use 'Subscriptions' if you're authenticated\n- Try authenticating to get personalized recommendations\n\nLast error: {}",
             last_error.unwrap_or_else(|| "Unknown error".to_string())
         ))
     }
-    
+
     // Try to get recommendations via YouTube Data API (if authenticated)
     // Gets recent videos from user's subscriptions as personalized recommendations
     async fn get_recommendations_via_api(&self) -> Result<Vec<Video>> {
         // Note: The 'home' parameter in activities.list is deprecated
         // So we get videos from user's subscriptions as a form of recommendations
         let subscriptions = self.get_subscriptions().await?;
-        
+
         if subscriptions.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Get recent videos from first few subscriptions
         let mut all_videos = Vec::new();
         for sub in subscriptions.iter().take(5) {
@@ -536,7 +564,7 @@ impl YouTubeClient {
                 all_videos.extend(videos.into_iter().take(10));
             }
         }
-        
+
         // Limit to 50 videos
         all_videos.truncate(50);
         Ok(all_videos)
@@ -546,35 +574,35 @@ impl YouTubeClient {
     pub async fn get_watch_history(&self) -> Result<Vec<Video>> {
         use crate::deps;
         use std::fs;
-        
+
         // Get history file path
         let history_file = get_history_file_path()?;
-        
+
         // Read history file
         let history_content = if history_file.exists() {
             fs::read_to_string(&history_file).unwrap_or_default()
         } else {
             return Ok(vec![]); // Return empty if file doesn't exist
         };
-        
+
         // Parse video IDs from file (one per line)
         let video_ids: Vec<String> = history_content
             .lines()
             .map(|line| line.trim().to_string())
             .filter(|line| !line.is_empty())
             .collect();
-        
+
         if video_ids.is_empty() {
             return Ok(vec![]);
         }
-        
+
         // Check if yt-dlp is available for fetching video metadata
         if !deps::check_ytdlp().await {
             if let Err(e) = deps::ensure_ytdlp().await {
                 return Err(anyhow::anyhow!("yt-dlp is not installed: {}", e));
             }
         }
-        
+
         #[cfg(windows)]
         let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
             local_ytdlp.to_str().unwrap().to_string()
@@ -583,7 +611,7 @@ impl YouTubeClient {
         };
         #[cfg(not(windows))]
         let ytdlp_cmd = "yt-dlp";
-        
+
         // Fetch metadata for each video ID
         let mut videos = Vec::new();
         for video_id in video_ids {
@@ -591,13 +619,14 @@ impl YouTubeClient {
             let output = TokioCommand::new(&ytdlp_cmd)
                 .args(&[
                     "--skip-download",
-                    "--print", "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
+                    "--print",
+                    "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
                     "--no-warnings",
                     &format!("https://www.youtube.com/watch?v={}", video_id),
                 ])
                 .output()
                 .await;
-            
+
             if let Ok(output) = output {
                 if output.status.success() {
                     let parsed = self.parse_ytdlp_output(&output.stdout).await;
@@ -607,23 +636,23 @@ impl YouTubeClient {
                 }
             }
         }
-        
+
         Ok(videos)
     }
-    
+
     // Add a video to watch history (insert at top, limit to 200)
     pub async fn add_to_history(&self, video_id: &str) -> Result<()> {
         use std::fs;
         use std::io::Write;
-        
+
         // Get history file path
         let history_file = get_history_file_path()?;
-        
+
         // Ensure config directory exists
         if let Some(parent) = history_file.parent() {
             fs::create_dir_all(parent)?;
         }
-        
+
         // Read existing history
         let mut history_lines: Vec<String> = if history_file.exists() {
             fs::read_to_string(&history_file)?
@@ -634,35 +663,35 @@ impl YouTubeClient {
         } else {
             Vec::new()
         };
-        
+
         // Insert new video ID at the top
         history_lines.insert(0, video_id.to_string());
-        
+
         // Limit to 200 lines
         if history_lines.len() > 200 {
             history_lines.truncate(200);
         }
-        
+
         // Write back to file
         let mut file = fs::File::create(&history_file)?;
         for line in history_lines {
             writeln!(file, "{}", line)?;
         }
-        
+
         Ok(())
     }
 
     // Search YouTube videos
     pub async fn search_videos(&self, query: &str) -> Result<Vec<Video>> {
         use crate::deps;
-        
+
         // Check if yt-dlp is available
         if !deps::check_ytdlp().await {
             if let Err(e) = deps::ensure_ytdlp().await {
                 return Err(anyhow::anyhow!("yt-dlp is not installed: {}", e));
             }
         }
-        
+
         #[cfg(windows)]
         let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
             local_ytdlp.to_str().unwrap().to_string()
@@ -671,13 +700,14 @@ impl YouTubeClient {
         };
         #[cfg(not(windows))]
         let ytdlp_cmd = "yt-dlp";
-        
+
         // Use yt-dlp to search videos
         let search_url = format!("ytsearch30:{}", query);
         let output = TokioCommand::new(ytdlp_cmd)
             .args(&[
                 "--flat-playlist",
-                "--print", "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
+                "--print",
+                "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
                 &search_url,
             ])
             .output()
@@ -802,4 +832,3 @@ fn get_history_file_path() -> Result<std::path::PathBuf> {
         .join("rustyoutube");
     Ok(dir.join("history.txt"))
 }
-

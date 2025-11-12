@@ -42,10 +42,12 @@ struct TokenPollResponse {
 impl AuthClient {
     pub fn new() -> Result<Self> {
         // Get OAuth credentials from environment
-        let client_id = std::env::var("GOOGLE_CLIENT_ID")
-            .context("GOOGLE_CLIENT_ID environment variable not set. Please set it before running.")?;
-        let client_secret = std::env::var("GOOGLE_CLIENT_SECRET")
-            .context("GOOGLE_CLIENT_SECRET environment variable not set. Please set it before running.")?;
+        let client_id = std::env::var("GOOGLE_CLIENT_ID").context(
+            "GOOGLE_CLIENT_ID environment variable not set. Please set it before running.",
+        )?;
+        let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").context(
+            "GOOGLE_CLIENT_SECRET environment variable not set. Please set it before running.",
+        )?;
 
         let config_dir = get_config_dir()?;
         let token_path = config_dir.join("token.json");
@@ -70,7 +72,7 @@ impl AuthClient {
         println!("Starting device authorization flow...\n");
 
         let http_client = Client::new();
-        
+
         // Step 1: Request device code
         let device_code_response = http_client
             .post("https://oauth2.googleapis.com/device/code")
@@ -151,7 +153,8 @@ impl AuthClient {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
-                        .as_secs() + d
+                        .as_secs()
+                        + d
                 });
 
                 let token_data = TokenData {
@@ -168,10 +171,9 @@ impl AuthClient {
     }
 
     async fn load_token(&self) -> Result<TokenData> {
-        let content = fs::read_to_string(&self.token_path)
-            .context("Failed to read token file")?;
-        let token: TokenData = serde_json::from_str(&content)
-            .context("Failed to parse token file")?;
+        let content = fs::read_to_string(&self.token_path).context("Failed to read token file")?;
+        let token: TokenData =
+            serde_json::from_str(&content).context("Failed to parse token file")?;
         Ok(token)
     }
 
@@ -255,7 +257,8 @@ impl AuthClient {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() + d
+                    .as_secs()
+                    + d
             }),
         };
 
@@ -271,4 +274,3 @@ fn get_config_dir() -> Result<PathBuf> {
         .join("rustyoutube");
     Ok(dir)
 }
-
