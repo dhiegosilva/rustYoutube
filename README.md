@@ -72,9 +72,56 @@ export GOOGLE_CLIENT_SECRET="your-client-secret-here"
 
 ## Building
 
+### Local Build
+
+**Linux:**
 ```bash
 cargo build --release
+# Or use the build script to create a self-contained AppImage:
+chmod +x build.sh
+./build.sh
 ```
+
+**Note:** The build script creates a self-contained AppImage that includes all necessary libraries and can be run directly without installation:
+```bash
+chmod +x rustyoutube-linux-x86_64.AppImage
+./rustyoutube-linux-x86_64.AppImage
+```
+
+**Windows:**
+```powershell
+cargo build --release
+# Or use the build script:
+.\build.ps1
+```
+
+### GitHub Actions Build
+
+The project includes GitHub Actions workflows for automated builds:
+
+1. **CI Workflow** (`.github/workflows/ci.yml`):
+   - Runs on every push and pull request
+   - Tests on Linux, Windows, and macOS
+   - Checks code formatting and linting
+
+2. **Build & Release Workflow** (`.github/workflows/build.yml`):
+   - Triggers on version tags (e.g., `v0.1.0`)
+   - Builds release binaries for Linux and Windows
+   - Creates release packages with locales and README
+   - Automatically creates GitHub releases with downloadable artifacts
+
+**To create a release:**
+```bash
+# Create and push a version tag
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow will automatically:
+- Build binaries for both platforms
+- Create self-contained AppImage for Linux (`.AppImage` - includes all necessary libraries)
+- Create ZIP package for Windows
+- Create a GitHub release with download links
 
 ## Running
 
@@ -166,4 +213,5 @@ The app stores your authentication token in:
 ## License
 
 MIT
+
 

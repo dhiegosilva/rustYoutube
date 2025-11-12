@@ -5,6 +5,15 @@ Cargo.lock
 token.json
 .env
 
+# Build artifacts
+release-package/
+AppDir/
+*.tar.gz
+rustyoutube-*.zip
+rustyoutube-*.tar.gz
+*.AppImage
+appimagetool-*.AppImage
+
 # Video files
 *.mp4
 *.webm
