@@ -102,7 +102,10 @@ Or run the binary directly:
 ### Navigation
 
 **Main Menu:**
-- `s` - View Subscriptions
+- `r` - Recommendations (YouTube trending/popular videos)
+- `s` - Search videos
+- `h` - Watch History (requires browser cookies)
+- `u` - View Subscriptions
 - `p` - View Playlists  
 - `c` - Browse Channel by URL
 - `q` - Quit
@@ -117,16 +120,32 @@ Or run the binary directly:
 
 **Video Playback**: Videos will open in mpv player. Make sure mpv is installed and in your PATH.
 
+### Watch History
+
+The application tracks your watch history locally. When you play a video, it's automatically added to your history:
+
+- **Storage**: History is stored in a text file (`history.txt`) in the config directory
+- **Location**: 
+  - **Windows**: `%APPDATA%\rustyoutube\history.txt`
+  - **Linux/macOS**: `~/.config/rustyoutube/history.txt`
+- **Format**: One video ID per line
+- **Limit**: Maximum of 200 videos (oldest entries are removed when limit is reached)
+- **Order**: Newest videos appear at the top
+
 ## Features
 
 - ✅ **SmartTube-style Device Authorization Flow** - No browser popup, enter code on any device
+- ✅ **Recommendations** - View trending and popular videos
+- ✅ **Search** - Search for videos on YouTube
+- ✅ **Watch History** - Local tracking of watched videos (up to 200 entries)
 - ✅ **View Subscriptions** - Browse all your subscribed channels
 - ✅ **View Playlists** - Access all your YouTube playlists
 - ✅ **Browse Channels** - Enter any channel URL to view videos
 - ✅ **Terminal UI** - Beautiful TUI with ratatui
-- ✅ **Video Playback** - Play videos using mpv + yt-dlp
+- ✅ **Video Playback** - Play videos using mpv + yt-dlp with instant streaming
 - ✅ **Automatic Token Refresh** - Tokens refresh automatically
 - ✅ **Auto-install Dependencies** - mpv and yt-dlp download automatically
+- ✅ **Multi-language Support** - English, German, Portuguese (Brazil), Spanish (Spain), French (France)
 
 ## Configuration
 
@@ -140,6 +159,9 @@ The app stores your authentication token in:
 - **"yt-dlp not found"**: Install yt-dlp and ensure it's in your PATH
 - **Authentication errors**: Check your Google OAuth credentials and ensure YouTube Data API v3 is enabled
 - **No videos showing**: Make sure you have active subscriptions on YouTube
+- **"No watch history found"**: 
+  - History is tracked locally - play some videos first to build your history
+  - History file is stored in the config directory (see Configuration section)
 
 ## License
 

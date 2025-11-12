@@ -27,6 +27,7 @@ pub struct Playlist {
     pub item_count: u32,
 }
 
+#[derive(Clone)]
 pub struct YouTubeClient {
     client: Option<Client>,
     access_token: Option<String>,
@@ -424,6 +425,271 @@ impl YouTubeClient {
 
         Ok(playlists)
     }
+
+    // Get YouTube homepage recommendations
+    // Note: YouTube's personalized homepage requires authentication and JavaScript.
+    // We try multiple methods to get trending/popular videos.
+    pub async fn get_recommendations(&self) -> Result<Vec<Video>> {
+        use crate::deps;
+        
+        // First, try using authenticated API if available (for personalized recommendations)
+        if self.is_authenticated() {
+            if let Ok(videos) = self.get_recommendations_via_api().await {
+                if !videos.is_empty() {
+                    return Ok(videos);
+                }
+            }
+        }
+        
+        // Check if yt-dlp is available
+        if !deps::check_ytdlp().await {
+            if let Err(e) = deps::ensure_ytdlp().await {
+                return Err(anyhow::anyhow!("yt-dlp is not installed: {}", e));
+            }
+        }
+        
+        #[cfg(windows)]
+        let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
+            local_ytdlp.to_str().unwrap().to_string()
+        } else {
+            "yt-dlp.exe".to_string()
+        };
+        #[cfg(not(windows))]
+        let ytdlp_cmd = "yt-dlp";
+        
+        // Try multiple methods to get trending/popular videos
+        // YouTube feeds don't work well with yt-dlp, so we use alternative approaches
+        // Note: YouTube's homepage requires JavaScript, so we use trending/popular content instead
+        let methods: Vec<(&str, Vec<&str>)> = vec![
+            // Method 1: Use trending URL with web client (most reliable)
+            ("https://www.youtube.com/feed/trending", vec!["--extractor-args", "youtube:player_client=web"]),
+            // Method 2: Use trending URL without extra args
+            ("https://www.youtube.com/feed/trending", vec![]),
+            // Method 3: Use a popular channel's videos as fallback (MrBeast)
+            ("https://www.youtube.com/@MrBeast/videos", vec![]),
+            // Method 4: Try another popular channel (PewDiePie)
+            ("https://www.youtube.com/@PewDiePie/videos", vec![]),
+        ];
+        
+        let mut last_error = None;
+        
+        for (url, extra_args) in methods {
+            let mut args = vec![
+                "--flat-playlist",
+                "--print", "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
+                "--playlist-end", "50",
+                "--no-warnings",
+            ];
+            args.extend(extra_args);
+            args.push(url);
+            
+            let result = TokioCommand::new(&ytdlp_cmd)
+                .args(&args)
+                .output()
+                .await;
+            
+            match result {
+                Ok(cmd_output) if cmd_output.status.success() => {
+                    let stdout_str = String::from_utf8_lossy(&cmd_output.stdout);
+                    if !stdout_str.trim().is_empty() {
+                        if let Ok(videos) = self.parse_ytdlp_output(&cmd_output.stdout).await {
+                            if !videos.is_empty() {
+                                return Ok(videos);
+                            }
+                        }
+                    }
+                }
+                Ok(cmd_output) => {
+                    let error = String::from_utf8_lossy(&cmd_output.stderr);
+                    if !error.contains("Unsupported URL") {
+                        last_error = Some(error.trim().to_string());
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(format!("Error: {}", e));
+                }
+            }
+        }
+        
+        // If all methods failed, return a helpful error
+        Err(anyhow::anyhow!(
+            "Could not fetch recommendations.\n\nYouTube's personalized homepage requires authentication and JavaScript rendering.\nTrending feeds may not be available in your region.\n\nSuggestions:\n- Use 'Search' to find videos\n- Use 'Subscriptions' if you're authenticated\n- Try authenticating to get personalized recommendations\n\nLast error: {}",
+            last_error.unwrap_or_else(|| "Unknown error".to_string())
+        ))
+    }
+    
+    // Try to get recommendations via YouTube Data API (if authenticated)
+    // Gets recent videos from user's subscriptions as personalized recommendations
+    async fn get_recommendations_via_api(&self) -> Result<Vec<Video>> {
+        // Note: The 'home' parameter in activities.list is deprecated
+        // So we get videos from user's subscriptions as a form of recommendations
+        let subscriptions = self.get_subscriptions().await?;
+        
+        if subscriptions.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Get recent videos from first few subscriptions
+        let mut all_videos = Vec::new();
+        for sub in subscriptions.iter().take(5) {
+            if let Ok(videos) = self.get_channel_videos_by_id(&sub.channel_id).await {
+                all_videos.extend(videos.into_iter().take(10));
+            }
+        }
+        
+        // Limit to 50 videos
+        all_videos.truncate(50);
+        Ok(all_videos)
+    }
+
+    // Get watch history from local file
+    pub async fn get_watch_history(&self) -> Result<Vec<Video>> {
+        use crate::deps;
+        use std::fs;
+        
+        // Get history file path
+        let history_file = get_history_file_path()?;
+        
+        // Read history file
+        let history_content = if history_file.exists() {
+            fs::read_to_string(&history_file).unwrap_or_default()
+        } else {
+            return Ok(vec![]); // Return empty if file doesn't exist
+        };
+        
+        // Parse video IDs from file (one per line)
+        let video_ids: Vec<String> = history_content
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        
+        if video_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        
+        // Check if yt-dlp is available for fetching video metadata
+        if !deps::check_ytdlp().await {
+            if let Err(e) = deps::ensure_ytdlp().await {
+                return Err(anyhow::anyhow!("yt-dlp is not installed: {}", e));
+            }
+        }
+        
+        #[cfg(windows)]
+        let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
+            local_ytdlp.to_str().unwrap().to_string()
+        } else {
+            "yt-dlp.exe".to_string()
+        };
+        #[cfg(not(windows))]
+        let ytdlp_cmd = "yt-dlp";
+        
+        // Fetch metadata for each video ID
+        let mut videos = Vec::new();
+        for video_id in video_ids {
+            // Use yt-dlp to get video metadata
+            let output = TokioCommand::new(&ytdlp_cmd)
+                .args(&[
+                    "--skip-download",
+                    "--print", "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
+                    "--no-warnings",
+                    &format!("https://www.youtube.com/watch?v={}", video_id),
+                ])
+                .output()
+                .await;
+            
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let parsed = self.parse_ytdlp_output(&output.stdout).await;
+                    if let Ok(mut parsed_videos) = parsed {
+                        videos.append(&mut parsed_videos);
+                    }
+                }
+            }
+        }
+        
+        Ok(videos)
+    }
+    
+    // Add a video to watch history (insert at top, limit to 200)
+    pub async fn add_to_history(&self, video_id: &str) -> Result<()> {
+        use std::fs;
+        use std::io::Write;
+        
+        // Get history file path
+        let history_file = get_history_file_path()?;
+        
+        // Ensure config directory exists
+        if let Some(parent) = history_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        
+        // Read existing history
+        let mut history_lines: Vec<String> = if history_file.exists() {
+            fs::read_to_string(&history_file)?
+                .lines()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty() && line != video_id) // Remove duplicates
+                .collect()
+        } else {
+            Vec::new()
+        };
+        
+        // Insert new video ID at the top
+        history_lines.insert(0, video_id.to_string());
+        
+        // Limit to 200 lines
+        if history_lines.len() > 200 {
+            history_lines.truncate(200);
+        }
+        
+        // Write back to file
+        let mut file = fs::File::create(&history_file)?;
+        for line in history_lines {
+            writeln!(file, "{}", line)?;
+        }
+        
+        Ok(())
+    }
+
+    // Search YouTube videos
+    pub async fn search_videos(&self, query: &str) -> Result<Vec<Video>> {
+        use crate::deps;
+        
+        // Check if yt-dlp is available
+        if !deps::check_ytdlp().await {
+            if let Err(e) = deps::ensure_ytdlp().await {
+                return Err(anyhow::anyhow!("yt-dlp is not installed: {}", e));
+            }
+        }
+        
+        #[cfg(windows)]
+        let ytdlp_cmd = if let Some(local_ytdlp) = deps::get_ytdlp_path().await {
+            local_ytdlp.to_str().unwrap().to_string()
+        } else {
+            "yt-dlp.exe".to_string()
+        };
+        #[cfg(not(windows))]
+        let ytdlp_cmd = "yt-dlp";
+        
+        // Use yt-dlp to search videos
+        let search_url = format!("ytsearch30:{}", query);
+        let output = TokioCommand::new(ytdlp_cmd)
+            .args(&[
+                "--flat-playlist",
+                "--print", "%(id)s|%(title)s|%(uploader)s|%(upload_date)s",
+                &search_url,
+            ])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to search videos: {}", error));
+        }
+
+        self.parse_ytdlp_output(&output.stdout).await
+    }
 }
 
 // API Response structures
@@ -527,3 +793,13 @@ struct Thumbnail {
     #[serde(default)]
     url: String,
 }
+
+// Helper function to get history file path
+fn get_history_file_path() -> Result<std::path::PathBuf> {
+    let dir = dirs::config_dir()
+        .or_else(|| dirs::home_dir().map(|d| d.join(".config")))
+        .context("Failed to find config directory")?
+        .join("rustyoutube");
+    Ok(dir.join("history.txt"))
+}
+
