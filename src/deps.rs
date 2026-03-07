@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
+use std::path::PathBuf;
 use tokio::process::Command as TokioCommand;
 
 #[cfg(windows)]
@@ -546,6 +545,7 @@ async fn download_ytdlp_from_github() -> Result<()> {
 
     use futures_util::StreamExt;
     use std::io::Write;
+    use tokio::io::AsyncWriteExt;
     while let Some(item) = stream.next().await {
         let chunk = item?;
         file.write_all(&chunk).await?;
@@ -667,6 +667,7 @@ pub async fn get_ytdlp_path() -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)] // Stub for API consistency; only Windows uses local yt-dlp path
 pub async fn get_ytdlp_path() -> Option<PathBuf> {
     None
 }
@@ -783,6 +784,7 @@ async fn download_mpv_from_github() -> Result<()> {
     let mut downloaded = 0u64;
     let total_size = response.content_length().unwrap_or(0);
 
+    use tokio::io::AsyncWriteExt;
     while let Some(chunk) = response.chunk().await? {
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;

@@ -28,6 +28,7 @@ enum ViewMode {
     Search,
     History,
     Subscriptions,
+    #[allow(dead_code)] // Reserved for future channel menu UI
     ChannelMenu,
     SubscriptionVideos,
     SubscriptionShorts,
@@ -85,7 +86,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     // Store handles for cancellation (download and playback)
     let download_handle: Arc<std::sync::Mutex<Option<Child>>> =
         Arc::new(std::sync::Mutex::new(None));
-    let playback_handle: Arc<std::sync::Mutex<Option<Child>>> =
+    let _playback_handle: Arc<std::sync::Mutex<Option<Child>>> =
         Arc::new(std::sync::Mutex::new(None));
 
     // Pagination state
@@ -1997,7 +1998,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     let mut handle_guard = download_handle.lock().unwrap();
                                     if let Some(mut child) = handle_guard.take() {
                                         // Kill the process asynchronously
-                                        let log_tx_cancel = log_tx_arc.clone();
+                                        let _log_tx_cancel = log_tx_arc.clone();
                                         tokio::spawn(async move {
                                             if let Err(e) = child.kill().await {
                                                 // Process might have already finished, ignore error
@@ -2238,7 +2239,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             Ok(new_videos) => {
                                                 all_videos = new_videos;
                                                 video_list_state.select(Some(0));
-                                                let total_pages =
+                                                let _total_pages =
                                                     calculate_total_pages(all_videos.len());
                                                 status_message = t_with_args(
                                                     "status_search_results",
@@ -2348,6 +2349,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // Reserved for future channel menu UI
 fn ui_channel_menu(f: &mut Frame, channel_name: &str, status: &str, log: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)

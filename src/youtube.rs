@@ -9,6 +9,7 @@ pub struct Video {
     pub title: String,
     pub channel_title: String,
     pub published_at: String,
+    #[allow(dead_code)]
     pub thumbnail_url: String,
 }
 
@@ -16,6 +17,7 @@ pub struct Video {
 pub struct Subscription {
     pub channel_id: String,
     pub channel_title: String,
+    #[allow(dead_code)]
     pub thumbnail_url: String,
 }
 
@@ -23,6 +25,7 @@ pub struct Subscription {
 pub struct Playlist {
     pub id: String,
     pub title: String,
+    #[allow(dead_code)]
     pub description: String,
     pub item_count: u32,
 }
