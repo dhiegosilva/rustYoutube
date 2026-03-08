@@ -15,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,9 +90,20 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
     let _playback_handle: Arc<std::sync::Mutex<Option<Child>>> =
         Arc::new(std::sync::Mutex::new(None));
 
-    // Pagination state
-    const VIDEOS_PER_PAGE: usize = 9;
+    // Pagination state (10 items per page: page 1 = 1–10, page 2 = 11–20, …)
+    const VIDEOS_PER_PAGE: usize = 10;
     let mut current_page = 0;
+
+    // Remember list position per view (context key -> (selected_index_in_page, page))
+    let mut saved_list_pos: HashMap<String, (usize, usize)> = HashMap::new();
+    // Remember subscriptions list selection when opening a channel (so we can restore when re-entering Subscriptions)
+    let mut saved_subscription_index: Option<usize> = None;
+    // Remember main Playlists list selection when opening a playlist
+    let mut saved_playlist_index: Option<usize> = None;
+    // Remember main menu selection when leaving to any option
+    let mut saved_main_menu_selection: Option<usize> = None;
+    // Remember list index for non-video lists (e.g. channel's playlists tab): context key -> index
+    let mut saved_list_index: HashMap<String, usize> = HashMap::new();
 
     // Helper function to get current page videos
     let get_current_page_videos = |all: &[Video], page: usize| -> Vec<Video> {
@@ -325,6 +337,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     }
                                 }
                                 KeyCode::Enter | KeyCode::Char(' ') => {
+                                    saved_main_menu_selection = Some(main_menu_selection);
                                     match main_menu_selection {
                                         0 => {
                                             // Recommendations
@@ -351,11 +364,33 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             match youtube_client.get_recommendations().await {
                                                 Ok(new_videos) => {
                                                     all_videos = new_videos;
-                                                    current_page = 0;
+                                                    let total_pages =
+                                                        calculate_total_pages(all_videos.len());
                                                     if all_videos.is_empty() {
                                                         status_message =
                                                             t("status_no_recommendations");
+                                                    } else if let Some((sel, page)) =
+                                                        saved_list_pos.get("recommendations")
+                                                    {
+                                                        current_page =
+                                                            (*page).min(total_pages.saturating_sub(1));
+                                                        let page_len = get_current_page_videos(
+                                                            &all_videos,
+                                                            current_page,
+                                                        )
+                                                        .len();
+                                                        video_list_state.select(Some(
+                                                            (*sel).min(page_len.saturating_sub(1)),
+                                                        ));
+                                                        status_message = t_with_args(
+                                                            "status_loaded_recommendations",
+                                                            &[(
+                                                                "count",
+                                                                &all_videos.len().to_string(),
+                                                            )],
+                                                        );
                                                     } else {
+                                                        current_page = 0;
                                                         video_list_state.select(Some(0));
                                                         status_message = t_with_args(
                                                             "status_loaded_recommendations",
@@ -403,10 +438,32 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             match youtube_client.get_watch_history().await {
                                                 Ok(new_videos) => {
                                                     history = new_videos;
-                                                    current_page = 0;
+                                                    let total_pages =
+                                                        calculate_total_pages(history.len());
                                                     if history.is_empty() {
                                                         status_message = t("status_no_history");
+                                                    } else if let Some((sel, page)) =
+                                                        saved_list_pos.get("history")
+                                                    {
+                                                        current_page =
+                                                            (*page).min(total_pages.saturating_sub(1));
+                                                        let page_len = get_current_page_videos(
+                                                            &history,
+                                                            current_page,
+                                                        )
+                                                        .len();
+                                                        video_list_state.select(Some(
+                                                            (*sel).min(page_len.saturating_sub(1)),
+                                                        ));
+                                                        status_message = t_with_args(
+                                                            "status_loaded_history",
+                                                            &[(
+                                                                "count",
+                                                                &history.len().to_string(),
+                                                            )],
+                                                        );
                                                     } else {
+                                                        current_page = 0;
                                                         video_list_state.select(Some(0));
                                                         status_message = t_with_args(
                                                             "status_loaded_history",
@@ -446,7 +503,10 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                             status_message =
                                                                 t("status_no_subscriptions");
                                                         } else {
-                                                            subscription_list_state.select(Some(0));
+                                                            let idx = saved_subscription_index
+                                                                .unwrap_or(0)
+                                                                .min(subscriptions.len().saturating_sub(1));
+                                                            subscription_list_state.select(Some(idx));
                                                             status_message = t_with_args(
                                                                 "status_loaded_subscriptions",
                                                                 &[(
@@ -485,7 +545,10 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 match youtube_client.get_playlists().await {
                                                     Ok(new_playlists) => {
                                                         playlists = new_playlists;
-                                                        playlist_list_state.select(Some(0));
+                                                        let idx = saved_playlist_index
+                                                            .unwrap_or(0)
+                                                            .min(playlists.len().saturating_sub(1));
+                                                        playlist_list_state.select(Some(idx));
                                                         status_message = format!(
                                                             "Loaded {} playlists",
                                                             playlists.len()
@@ -533,7 +596,10 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                 if subscriptions.is_empty() {
                                                     status_message = t("status_no_subscriptions");
                                                 } else {
-                                                    subscription_list_state.select(Some(0));
+                                                    let idx = saved_subscription_index
+                                                        .unwrap_or(0)
+                                                        .min(subscriptions.len().saturating_sub(1));
+                                                    subscription_list_state.select(Some(idx));
                                                     status_message = t_with_args(
                                                         "status_loaded_subscriptions",
                                                         &[(
@@ -571,7 +637,10 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         match youtube_client.get_playlists().await {
                                             Ok(new_playlists) => {
                                                 playlists = new_playlists;
-                                                playlist_list_state.select(Some(0));
+                                                let idx = saved_playlist_index
+                                                    .unwrap_or(0)
+                                                    .min(playlists.len().saturating_sub(1));
+                                                playlist_list_state.select(Some(idx));
                                                 status_message =
                                                     format!("Loaded {} playlists", playlists.len());
                                             }
@@ -598,6 +667,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                             match key.code {
                                 KeyCode::Char('m') | KeyCode::Esc => {
                                     view_mode = ViewMode::MainMenu;
+                                    main_menu_selection =
+                                        saved_main_menu_selection.unwrap_or(0);
                                     status_message = "Main menu".to_string();
                                 }
                                 KeyCode::Up => {
@@ -617,6 +688,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 KeyCode::Enter | KeyCode::Char(' ') => {
                                     if let Some(selected) = subscription_list_state.selected() {
                                         if selected < subscriptions.len() {
+                                            saved_subscription_index = Some(selected);
                                             let sub = &subscriptions[selected];
                                             selected_channel_id = Some(sub.channel_id.clone());
                                             selected_channel_title =
@@ -654,9 +726,25 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                         separate_videos_and_shorts(new_videos);
                                                     all_videos = videos;
                                                     all_shorts = shorts;
-                                                    video_list_state.select(Some(0));
                                                     let total_pages =
                                                         calculate_total_pages(all_videos.len());
+                                                    if let Some((sel, page)) = saved_list_pos
+                                                        .get(&format!("sub:{}:0", sub.channel_id))
+                                                    {
+                                                        current_page =
+                                                            (*page).min(total_pages.saturating_sub(1));
+                                                        let page_len = get_current_page_videos(
+                                                            &all_videos,
+                                                            current_page,
+                                                        )
+                                                        .len();
+                                                        video_list_state.select(Some(
+                                                            (*sel).min(page_len.saturating_sub(1)),
+                                                        ));
+                                                    } else {
+                                                        video_list_state.select(Some(0));
+                                                        current_page = 0;
+                                                    }
                                                     status_message = format!(
                                                         "Loaded {} videos from {} (Page {}/{})",
                                                         all_videos.len(),
@@ -715,6 +803,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                         ViewMode::Playlists => match key.code {
                             KeyCode::Char('m') | KeyCode::Esc => {
                                 view_mode = ViewMode::MainMenu;
+                                main_menu_selection =
+                                    saved_main_menu_selection.unwrap_or(0);
                                 status_message = "Main menu".to_string();
                             }
                             KeyCode::Up => {
@@ -734,6 +824,7 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                             KeyCode::Enter | KeyCode::Char(' ') => {
                                 if let Some(selected) = playlist_list_state.selected() {
                                     if selected < playlists.len() {
+                                        saved_playlist_index = Some(selected);
                                         let playlist = &playlists[selected];
                                         view_mode = ViewMode::PlaylistVideos;
                                         current_page = 0;
@@ -756,9 +847,25 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         {
                                             Ok(new_videos) => {
                                                 all_videos = new_videos;
-                                                video_list_state.select(Some(0));
                                                 let total_pages =
                                                     calculate_total_pages(all_videos.len());
+                                                if let Some((sel, page)) = saved_list_pos
+                                                    .get(&format!("playlist:{}", playlist.id))
+                                                {
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_videos,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    video_list_state.select(Some(0));
+                                                    current_page = 0;
+                                                }
                                                 status_message = t_with_args(
                                                     "status_loaded_videos_from",
                                                     &[
@@ -858,9 +965,25 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                             {
                                                 Ok(new_videos) => {
                                                     all_videos = new_videos;
-                                                    video_list_state.select(Some(0));
                                                     let total_pages =
                                                         calculate_total_pages(all_videos.len());
+                                                    if let Some((sel, page)) = saved_list_pos
+                                                        .get(&format!("playlist:{}", playlist.id))
+                                                    {
+                                                        current_page =
+                                                            (*page).min(total_pages.saturating_sub(1));
+                                                        let page_len = get_current_page_videos(
+                                                            &all_videos,
+                                                            current_page,
+                                                        )
+                                                        .len();
+                                                        video_list_state.select(Some(
+                                                            (*sel).min(page_len.saturating_sub(1)),
+                                                        ));
+                                                    } else {
+                                                        video_list_state.select(Some(0));
+                                                        current_page = 0;
+                                                    }
                                                     status_message = t_with_args(
                                                         "status_loaded_videos_from",
                                                         &[
@@ -892,8 +1015,53 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     // Switch to previous tab
                                     if channel_tab > 0 {
                                         channel_tab -= 1;
-                                        current_page = 0;
-                                        video_list_state.select(Some(0));
+                                        if let Some(ref cid) = selected_channel_id {
+                                            if channel_tab == 0 && !all_videos.is_empty() {
+                                                let key = format!("sub:{}:0", cid);
+                                                if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                    let total_pages =
+                                                        calculate_total_pages(all_videos.len());
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_videos,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    current_page = 0;
+                                                    video_list_state.select(Some(0));
+                                                }
+                                            } else if channel_tab == 1 && !all_shorts.is_empty() {
+                                                let key = format!("sub:{}:1", cid);
+                                                if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                    let total_pages =
+                                                        calculate_total_pages(all_shorts.len());
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_shorts,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    current_page = 0;
+                                                    video_list_state.select(Some(0));
+                                                }
+                                            } else {
+                                                current_page = 0;
+                                                video_list_state.select(Some(0));
+                                            }
+                                        } else {
+                                            current_page = 0;
+                                            video_list_state.select(Some(0));
+                                        }
                                         if channel_tab == 0 {
                                             view_mode = ViewMode::SubscriptionVideos;
                                             if !all_videos.is_empty() {
@@ -932,9 +1100,35 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 }
                                 KeyCode::Char('1') => {
                                     channel_tab = 0;
-                                    current_page = 0;
-                                    video_list_state.select(Some(0));
                                     view_mode = ViewMode::SubscriptionVideos;
+                                    if let Some(ref cid) = selected_channel_id {
+                                        if !all_videos.is_empty() {
+                                            let key = format!("sub:{}:0", cid);
+                                            if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                let total_pages =
+                                                    calculate_total_pages(all_videos.len());
+                                                current_page =
+                                                    (*page).min(total_pages.saturating_sub(1));
+                                                let page_len = get_current_page_videos(
+                                                    &all_videos,
+                                                    current_page,
+                                                )
+                                                .len();
+                                                video_list_state.select(Some(
+                                                    (*sel).min(page_len.saturating_sub(1)),
+                                                ));
+                                            } else {
+                                                current_page = 0;
+                                                video_list_state.select(Some(0));
+                                            }
+                                        } else {
+                                            current_page = 0;
+                                            video_list_state.select(Some(0));
+                                        }
+                                    } else {
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                    }
                                     if !all_videos.is_empty() {
                                         let total_pages = calculate_total_pages(all_videos.len());
                                         status_message = format!(
@@ -948,9 +1142,35 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 }
                                 KeyCode::Char('2') => {
                                     channel_tab = 1;
-                                    current_page = 0;
-                                    video_list_state.select(Some(0));
                                     view_mode = ViewMode::SubscriptionShorts;
+                                    if let Some(ref cid) = selected_channel_id {
+                                        if !all_shorts.is_empty() {
+                                            let key = format!("sub:{}:1", cid);
+                                            if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                let total_pages =
+                                                    calculate_total_pages(all_shorts.len());
+                                                current_page =
+                                                    (*page).min(total_pages.saturating_sub(1));
+                                                let page_len = get_current_page_videos(
+                                                    &all_shorts,
+                                                    current_page,
+                                                )
+                                                .len();
+                                                video_list_state.select(Some(
+                                                    (*sel).min(page_len.saturating_sub(1)),
+                                                ));
+                                            } else {
+                                                current_page = 0;
+                                                video_list_state.select(Some(0));
+                                            }
+                                        } else {
+                                            current_page = 0;
+                                            video_list_state.select(Some(0));
+                                        }
+                                    } else {
+                                        current_page = 0;
+                                        video_list_state.select(Some(0));
+                                    }
                                     if !all_shorts.is_empty() {
                                         let total_pages = calculate_total_pages(all_shorts.len());
                                         status_message = format!(
@@ -984,10 +1204,14 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         {
                                             Ok(new_playlists) => {
                                                 channel_playlists = new_playlists;
-                                                if playlist_list_state.selected().unwrap_or(0)
-                                                    >= channel_playlists.len()
-                                                {
-                                                    playlist_list_state.select(Some(0));
+                                                let key = format!("sub_playlists:{}", channel_id);
+                                                let idx = saved_list_index
+                                                    .get(&key)
+                                                    .copied()
+                                                    .unwrap_or(0)
+                                                    .min(channel_playlists.len().saturating_sub(1));
+                                                if !channel_playlists.is_empty() {
+                                                    playlist_list_state.select(Some(idx));
                                                 }
                                                 status_message = format!(
                                                     "Loaded {} playlists from {}",
@@ -1015,12 +1239,91 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                         | ViewMode::ChannelVideos => {
                             match key.code {
                                 KeyCode::Esc => {
+                                    // Save list position before leaving so we can restore when re-entering
+                                    if view_mode == ViewMode::SubscriptionVideos
+                                        || view_mode == ViewMode::SubscriptionShorts
+                                    {
+                                        if let Some(ref cid) = selected_channel_id {
+                                            let key = format!(
+                                                "sub:{}:{}",
+                                                cid,
+                                                if view_mode == ViewMode::SubscriptionShorts {
+                                                    1
+                                                } else {
+                                                    0
+                                                }
+                                            );
+                                            saved_list_pos.insert(
+                                                key,
+                                                (
+                                                    video_list_state.selected().unwrap_or(0),
+                                                    current_page,
+                                                ),
+                                            );
+                                        }
+                                    } else if view_mode == ViewMode::PlaylistVideos {
+                                        let playlist_id = if selected_channel_id.is_some() {
+                                            let idx = playlist_list_state.selected().unwrap_or(0);
+                                            if let Some(ref cid) = selected_channel_id {
+                                                saved_list_index
+                                                    .insert(format!("sub_playlists:{}", cid), idx);
+                                            }
+                                            channel_playlists.get(idx).map(|p| p.id.clone())
+                                        } else {
+                                            playlists
+                                                .get(playlist_list_state.selected().unwrap_or(0))
+                                                .map(|p| p.id.clone())
+                                        };
+                                        if let Some(ref pid) = playlist_id {
+                                            saved_list_pos.insert(
+                                                format!("playlist:{}", pid),
+                                                (
+                                                    video_list_state.selected().unwrap_or(0),
+                                                    current_page,
+                                                ),
+                                            );
+                                        }
+                                    } else if view_mode == ViewMode::Recommendations {
+                                        saved_list_pos.insert(
+                                            "recommendations".to_string(),
+                                            (
+                                                video_list_state.selected().unwrap_or(0),
+                                                current_page,
+                                            ),
+                                        );
+                                    } else if view_mode == ViewMode::History {
+                                        saved_list_pos.insert(
+                                            "history".to_string(),
+                                            (
+                                                video_list_state.selected().unwrap_or(0),
+                                                current_page,
+                                            ),
+                                        );
+                                    } else if view_mode == ViewMode::SearchResults {
+                                        saved_list_pos.insert(
+                                            "search".to_string(),
+                                            (
+                                                video_list_state.selected().unwrap_or(0),
+                                                current_page,
+                                            ),
+                                        );
+                                    } else if view_mode == ViewMode::ChannelVideos {
+                                        saved_list_pos.insert(
+                                            "channel_input".to_string(),
+                                            (
+                                                video_list_state.selected().unwrap_or(0),
+                                                current_page,
+                                            ),
+                                        );
+                                    }
                                     // Go back to previous view
                                     if view_mode == ViewMode::Recommendations
                                         || view_mode == ViewMode::History
                                         || view_mode == ViewMode::SearchResults
                                     {
                                         view_mode = ViewMode::MainMenu;
+                                        main_menu_selection =
+                                            saved_main_menu_selection.unwrap_or(0);
                                         status_message = "Main menu".to_string();
                                     } else if view_mode == ViewMode::SubscriptionVideos
                                         || view_mode == ViewMode::SubscriptionShorts
@@ -1054,8 +1357,53 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 {
                                     if channel_tab > 0 {
                                         channel_tab -= 1;
-                                        current_page = 0;
-                                        video_list_state.select(Some(0));
+                                        if let Some(ref cid) = selected_channel_id {
+                                            if channel_tab == 0 && !all_videos.is_empty() {
+                                                let key = format!("sub:{}:0", cid);
+                                                if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                    let total_pages =
+                                                        calculate_total_pages(all_videos.len());
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_videos,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    current_page = 0;
+                                                    video_list_state.select(Some(0));
+                                                }
+                                            } else if channel_tab == 1 && !all_shorts.is_empty() {
+                                                let key = format!("sub:{}:1", cid);
+                                                if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                    let total_pages =
+                                                        calculate_total_pages(all_shorts.len());
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_shorts,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    current_page = 0;
+                                                    video_list_state.select(Some(0));
+                                                }
+                                            } else {
+                                                current_page = 0;
+                                                video_list_state.select(Some(0));
+                                            }
+                                        } else {
+                                            current_page = 0;
+                                            video_list_state.select(Some(0));
+                                        }
 
                                         // Switch to the appropriate view mode and load data
                                         if let Some(channel_id) = &selected_channel_id {
@@ -1239,7 +1587,21 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                                         .unwrap_or("channel")
                                                                 );
                                                             } else {
-                                                                playlist_list_state.select(Some(0));
+                                                                let key = format!(
+                                                                    "sub_playlists:{}",
+                                                                    channel_id
+                                                                );
+                                                                let idx = saved_list_index
+                                                                    .get(&key)
+                                                                    .copied()
+                                                                    .unwrap_or(0)
+                                                                    .min(
+                                                                        channel_playlists
+                                                                            .len()
+                                                                            .saturating_sub(1),
+                                                                    );
+                                                                playlist_list_state
+                                                                    .select(Some(idx));
                                                                 status_message = format!(
                                                                     "Loaded {} playlists from {}",
                                                                     channel_playlists.len(),
@@ -1267,8 +1629,53 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 {
                                     if channel_tab < 2 {
                                         channel_tab += 1;
-                                        current_page = 0;
-                                        video_list_state.select(Some(0));
+                                        if let Some(ref cid) = selected_channel_id {
+                                            if channel_tab == 0 && !all_videos.is_empty() {
+                                                let key = format!("sub:{}:0", cid);
+                                                if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                    let total_pages =
+                                                        calculate_total_pages(all_videos.len());
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_videos,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    current_page = 0;
+                                                    video_list_state.select(Some(0));
+                                                }
+                                            } else if channel_tab == 1 && !all_shorts.is_empty() {
+                                                let key = format!("sub:{}:1", cid);
+                                                if let Some((sel, page)) = saved_list_pos.get(&key) {
+                                                    let total_pages =
+                                                        calculate_total_pages(all_shorts.len());
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_shorts,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    current_page = 0;
+                                                    video_list_state.select(Some(0));
+                                                }
+                                            } else {
+                                                current_page = 0;
+                                                video_list_state.select(Some(0));
+                                            }
+                                        } else {
+                                            current_page = 0;
+                                            video_list_state.select(Some(0));
+                                        }
 
                                         // Switch to the appropriate view mode and load data
                                         if let Some(channel_id) = &selected_channel_id {
@@ -1402,7 +1809,21 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                                         .unwrap_or("channel")
                                                                 );
                                                             } else {
-                                                                playlist_list_state.select(Some(0));
+                                                                let key = format!(
+                                                                    "sub_playlists:{}",
+                                                                    channel_id
+                                                                );
+                                                                let idx = saved_list_index
+                                                                    .get(&key)
+                                                                    .copied()
+                                                                    .unwrap_or(0)
+                                                                    .min(
+                                                                        channel_playlists
+                                                                            .len()
+                                                                            .saturating_sub(1),
+                                                                    );
+                                                                playlist_list_state
+                                                                    .select(Some(idx));
                                                                 status_message = format!(
                                                                     "Loaded {} playlists from {}",
                                                                     channel_playlists.len(),
@@ -1523,7 +1944,21 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                                 .unwrap_or("channel")
                                                         );
                                                     } else {
-                                                        playlist_list_state.select(Some(0));
+                                                        let key = format!(
+                                                            "sub_playlists:{}",
+                                                            channel_id
+                                                        );
+                                                        let idx = saved_list_index
+                                                            .get(&key)
+                                                            .copied()
+                                                            .unwrap_or(0)
+                                                            .min(
+                                                                channel_playlists
+                                                                    .len()
+                                                                    .saturating_sub(1),
+                                                            );
+                                                        playlist_list_state
+                                                            .select(Some(idx));
                                                         status_message = format!(
                                                             "Loaded {} playlists from {}",
                                                             channel_playlists.len(),
@@ -1563,156 +1998,6 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         if selected < page_videos.len().saturating_sub(1) {
                                             video_list_state.select(Some(selected + 1));
                                         }
-                                    }
-                                }
-                                // Number key shortcuts (1-9) for direct item selection
-                                // Note: '1', '2', '3' are used for tab switching in channel views, so they're handled separately
-                                // Keys 1-9 select items 0-8 (displayed as 1-9)
-                                KeyCode::Char('1')
-                                    if view_mode != ViewMode::SubscriptionVideos
-                                        && view_mode != ViewMode::SubscriptionShorts
-                                        && view_mode != ViewMode::SubscriptionPlaylists =>
-                                {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 0 {
-                                        video_list_state.select(Some(0));
-                                    }
-                                }
-                                KeyCode::Char('2')
-                                    if view_mode != ViewMode::SubscriptionVideos
-                                        && view_mode != ViewMode::SubscriptionShorts
-                                        && view_mode != ViewMode::SubscriptionPlaylists =>
-                                {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 1 {
-                                        video_list_state.select(Some(1));
-                                    }
-                                }
-                                KeyCode::Char('3')
-                                    if view_mode != ViewMode::SubscriptionVideos
-                                        && view_mode != ViewMode::SubscriptionShorts
-                                        && view_mode != ViewMode::SubscriptionPlaylists =>
-                                {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 2 {
-                                        video_list_state.select(Some(2));
-                                    }
-                                }
-                                KeyCode::Char('4') => {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 3 {
-                                        video_list_state.select(Some(3));
-                                    }
-                                }
-                                KeyCode::Char('5') => {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 4 {
-                                        video_list_state.select(Some(4));
-                                    }
-                                }
-                                KeyCode::Char('6') => {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 5 {
-                                        video_list_state.select(Some(5));
-                                    }
-                                }
-                                KeyCode::Char('7') => {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 6 {
-                                        video_list_state.select(Some(6));
-                                    }
-                                }
-                                KeyCode::Char('8') => {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 7 {
-                                        video_list_state.select(Some(7));
-                                    }
-                                }
-                                KeyCode::Char('9') => {
-                                    // Determine which list to use based on view mode
-                                    let current_list: &[Video] = if view_mode == ViewMode::History {
-                                        &history
-                                    } else if view_mode == ViewMode::SubscriptionShorts {
-                                        &all_shorts
-                                    } else {
-                                        &all_videos
-                                    };
-                                    let page_videos =
-                                        get_current_page_videos(current_list, current_page);
-                                    if page_videos.len() > 8 {
-                                        video_list_state.select(Some(8));
                                     }
                                 }
                                 KeyCode::PageDown | KeyCode::Char('n') | KeyCode::Right
@@ -2087,7 +2372,21 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                                                     .unwrap_or("channel")
                                                             );
                                                         } else {
-                                                            playlist_list_state.select(Some(0));
+                                                            let key = format!(
+                                                                "sub_playlists:{}",
+                                                                channel_id
+                                                            );
+                                                            let idx = saved_list_index
+                                                                .get(&key)
+                                                                .copied()
+                                                                .unwrap_or(0)
+                                                                .min(
+                                                                    channel_playlists
+                                                                        .len()
+                                                                        .saturating_sub(1),
+                                                                );
+                                                            playlist_list_state
+                                                                .select(Some(idx));
                                                             status_message = format!(
                                                                 "Loaded {} playlists from {}",
                                                                 channel_playlists.len(),
@@ -2197,6 +2496,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                 KeyCode::Esc => {
                                     // Always return to main menu
                                     view_mode = ViewMode::MainMenu;
+                                    main_menu_selection =
+                                        saved_main_menu_selection.unwrap_or(0);
                                     search_query.clear();
                                     search_input_mode = false;
                                     status_message = "Main menu".to_string();
@@ -2205,6 +2506,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     // Only exit if not in input mode, otherwise treat as regular character
                                     if !search_input_mode {
                                         view_mode = ViewMode::MainMenu;
+                                        main_menu_selection =
+                                            saved_main_menu_selection.unwrap_or(0);
                                         search_query.clear();
                                         search_input_mode = false;
                                         status_message = "Main menu".to_string();
@@ -2238,9 +2541,25 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                         match youtube_client.search_videos(&search_query).await {
                                             Ok(new_videos) => {
                                                 all_videos = new_videos;
-                                                video_list_state.select(Some(0));
-                                                let _total_pages =
+                                                let total_pages =
                                                     calculate_total_pages(all_videos.len());
+                                                if let Some((sel, page)) =
+                                                    saved_list_pos.get("search")
+                                                {
+                                                    current_page =
+                                                        (*page).min(total_pages.saturating_sub(1));
+                                                    let page_len = get_current_page_videos(
+                                                        &all_videos,
+                                                        current_page,
+                                                    )
+                                                    .len();
+                                                    video_list_state.select(Some(
+                                                        (*sel).min(page_len.saturating_sub(1)),
+                                                    ));
+                                                } else {
+                                                    current_page = 0;
+                                                    video_list_state.select(Some(0));
+                                                }
                                                 status_message = t_with_args(
                                                     "status_search_results",
                                                     &[
@@ -2269,6 +2588,8 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                         ViewMode::ChannelInput => match key.code {
                             KeyCode::Char('m') | KeyCode::Esc => {
                                 view_mode = ViewMode::MainMenu;
+                                main_menu_selection =
+                                    saved_main_menu_selection.unwrap_or(0);
                                 channel_url.clear();
                                 status_message = "Main menu".to_string();
                             }
@@ -2293,7 +2614,25 @@ pub async fn run(youtube_client: YouTubeClient) -> Result<()> {
                                     match youtube_client.get_channel_videos(&channel_url).await {
                                         Ok(new_videos) => {
                                             all_videos = new_videos;
-                                            video_list_state.select(Some(0));
+                                            let total_pages =
+                                                calculate_total_pages(all_videos.len());
+                                            if let Some((sel, page)) =
+                                                saved_list_pos.get("channel_input")
+                                            {
+                                                current_page =
+                                                    (*page).min(total_pages.saturating_sub(1));
+                                                let page_len = get_current_page_videos(
+                                                    &all_videos,
+                                                    current_page,
+                                                )
+                                                .len();
+                                                video_list_state.select(Some(
+                                                    (*sel).min(page_len.saturating_sub(1)),
+                                                ));
+                                            } else {
+                                                current_page = 0;
+                                                video_list_state.select(Some(0));
+                                            }
                                             let total_pages =
                                                 calculate_total_pages(all_videos.len());
                                             status_message = t_with_args(
@@ -2682,7 +3021,7 @@ fn ui_subscriptions(
     f.render_widget(log_widget, chunks[2]);
 
     // Status bar
-    let help_text = "↑/↓: Navigate | 1-9: Select item | PageUp/PageDown: Prev/Next Page | Enter/Space: View Videos | r: Refresh | Esc/m: Back | Ctrl+Q/Ctrl+C: Quit";
+    let help_text = "↑/↓: Navigate | PageUp/PageDown: Prev/Next Page | Enter/Space: View Videos | r: Refresh | Esc/m: Back | Ctrl+Q/Ctrl+C: Quit";
     let status_text = format!("{} | {}", status, help_text);
     let status_widget = Paragraph::new(status_text)
         .style(Style::default().fg(Color::Green))
@@ -2838,7 +3177,7 @@ fn ui_playlists(
     f.render_widget(log_widget, chunks[2]);
 
     // Status bar
-    let help_text = "↑/↓: Navigate | 1-9: Select item | PageUp/PageDown: Prev/Next Page | Enter/Space: View Videos | r: Refresh | Esc/m: Back | Ctrl+Q/Ctrl+C: Quit";
+    let help_text = "↑/↓: Navigate | PageUp/PageDown: Prev/Next Page | Enter/Space: View Videos | r: Refresh | Esc/m: Back | Ctrl+Q/Ctrl+C: Quit";
     let status_text = format!("{} | {}", status, help_text);
     let status_widget = Paragraph::new(status_text)
         .style(Style::default().fg(Color::Green))
@@ -2938,16 +3277,18 @@ fn ui_videos(
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
 
-    // Video list
+    // Video list (global numbers: page 1 = 1–10, page 2 = 11–20, …); current_page is 1-based
+    const PER_PAGE: usize = 10;
+    let page_zero = current_page.saturating_sub(1);
     let items: Vec<ListItem> = videos
         .iter()
         .enumerate()
         .map(|(i, video)| {
             let date = format_date(&video.published_at);
-            // Use local index (1-9 per page)
+            let num = page_zero * PER_PAGE + i + 1;
             let content = vec![
                 Line::from(vec![
-                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Yellow)),
+                    Span::styled(format!("{}. ", num), Style::default().fg(Color::Yellow)),
                     Span::styled(
                         &video.title,
                         Style::default()
@@ -2990,9 +3331,9 @@ fn ui_videos(
 
     // Status bar
     let help_text = if total_pages > 1 {
-        "↑/↓: Navigate | 1-9: Select item | p: Play | d: Download | c: Cancel | PageUp/PageDown: Prev/Next Page | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
+        "↑/↓: Navigate | p: Play | d: Download | c: Cancel | PageUp/PageDown: Prev/Next Page | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
     } else {
-        "↑/↓: Navigate | 1-9: Select item | p: Play | d: Download | c: Cancel | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
+        "↑/↓: Navigate | p: Play | d: Download | c: Cancel | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
     };
     let status_text = format!("{} | {}", status, help_text);
     let status_widget = Paragraph::new(status_text)
@@ -3061,16 +3402,18 @@ fn ui_channel_with_tabs(
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
 
-    // Video list
+    // Video list (global numbers: page 1 = 1–10, page 2 = 11–20, …); current_page is 1-based
+    const PER_PAGE: usize = 10;
+    let page_zero = current_page.saturating_sub(1);
     let items: Vec<ListItem> = videos
         .iter()
         .enumerate()
         .map(|(i, video)| {
             let date = format_date(&video.published_at);
-            // Use local index (1-9 per page)
+            let num = page_zero * PER_PAGE + i + 1;
             let content = vec![
                 Line::from(vec![
-                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Yellow)),
+                    Span::styled(format!("{}. ", num), Style::default().fg(Color::Yellow)),
                     Span::styled(
                         &video.title,
                         Style::default()
@@ -3117,11 +3460,11 @@ fn ui_channel_with_tabs(
 
     // Status bar
     let help_text = if active_tab == 2 {
-        "↑/↓: Navigate | 1-9: Select item | Enter/Space: View Playlist | ←/→/1/2/3: Switch Tab | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
+        "↑/↓: Navigate | Enter/Space: View Playlist | ←/→/1/2/3: Switch Tab | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
     } else if total_pages > 1 {
-        "↑/↓: Navigate | 1-9: Select item | p: Play | d: Download | c: Cancel | ←/→/1/2/3: Switch Tab | PageUp/PageDown: Prev/Next Page | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
+        "↑/↓: Navigate | p: Play | d: Download | c: Cancel | ←/→/1/2/3: Switch Tab | PageUp/PageDown: Prev/Next Page | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
     } else {
-        "↑/↓: Navigate | 1-9: Select item | p: Play | d: Download | c: Cancel | ←/→/1/2/3: Switch Tab | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
+        "↑/↓: Navigate | p: Play | d: Download | c: Cancel | ←/→/1/2/3: Switch Tab | r: Refresh | Esc: Back | Ctrl+Q/Ctrl+C: Quit"
     };
     let status_text = format!("{} | {}", status, help_text);
     let status_widget = Paragraph::new(status_text)
@@ -3235,7 +3578,7 @@ fn ui_channel_with_tabs_playlists(
     f.render_widget(log_widget, chunks[2]);
 
     // Status bar
-    let help_text = "↑/↓: Navigate | 1-9: Select item | PageUp/PageDown: Prev/Next Page | Enter/Space: View Playlist | ←/→/1/2/3: Switch Tab | Esc: Back | Ctrl+Q/Ctrl+C: Quit";
+    let help_text = "↑/↓: Navigate | PageUp/PageDown: Prev/Next Page | Enter/Space: View Playlist | ←/→/1/2/3: Switch Tab | Esc: Back | Ctrl+Q/Ctrl+C: Quit";
     let status_text = format!("{} | {}", status, help_text);
     let status_widget = Paragraph::new(status_text)
         .style(Style::default().fg(Color::Green))

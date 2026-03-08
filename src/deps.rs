@@ -6,7 +6,13 @@ use tokio::process::Command as TokioCommand;
 #[cfg(windows)]
 const MPV_CMD: &str = "mpv.exe";
 #[cfg(not(windows))]
+#[allow(dead_code)]
 const MPV_CMD: &str = "mpv";
+
+#[cfg(windows)]
+const VLC_CMD: &str = "vlc.exe";
+#[cfg(not(windows))]
+const VLC_CMD: &str = "vlc";
 
 #[cfg(windows)]
 const YTDLP_CMD: &str = "yt-dlp.exe";
@@ -14,11 +20,12 @@ const YTDLP_CMD: &str = "yt-dlp.exe";
 const YTDLP_CMD: &str = "yt-dlp";
 
 pub async fn ensure_dependencies() -> Result<()> {
-    ensure_mpv().await?;
+    ensure_vlc().await?;
     ensure_ytdlp().await?;
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn ensure_mpv() -> Result<()> {
     // Check local mpv first (downloaded from GitHub)
     #[cfg(windows)]
@@ -164,6 +171,240 @@ pub async fn ensure_mpv() -> Result<()> {
             Linux: sudo apt install mpv (or sudo pacman -S mpv)\n\
             macOS: brew install mpv\n\
             Or visit: https://mpv.io/installation/"
+        ))
+    }
+}
+
+/// Check if VLC is available via Flatpak (Linux).
+#[cfg(target_os = "linux")]
+async fn check_flatpak_vlc() -> bool {
+    let output = TokioCommand::new("flatpak")
+        .args(&["list", "--app", "--columns=application"])
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains("org.videolan.VLC")
+        }
+        _ => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn check_flatpak_vlc() -> bool {
+    false
+}
+
+pub async fn check_vlc() -> bool {
+    if check_command(VLC_CMD).await {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    if check_flatpak_vlc().await {
+        return true;
+    }
+    false
+}
+
+/// Returns (executable, args) to run VLC with the given stream URL.
+/// Prefers system VLC; if not found on Linux, uses Flatpak VLC.
+#[allow(dead_code)]
+pub async fn get_vlc_play_invocation(stream_url: &str) -> (String, Vec<String>) {
+    if check_command(VLC_CMD).await {
+        return (
+            VLC_CMD.to_string(),
+            vec![
+                "--play-and-exit".to_string(),
+                "--no-qt-privacy".to_string(),
+                stream_url.to_string(),
+            ],
+        );
+    }
+    #[cfg(target_os = "linux")]
+    if check_flatpak_vlc().await {
+        return (
+            "flatpak".to_string(),
+            vec![
+                "run".to_string(),
+                "org.videolan.VLC".to_string(),
+                "--play-and-exit".to_string(),
+                "--no-qt-privacy".to_string(),
+                stream_url.to_string(),
+            ],
+        );
+    }
+    (
+        VLC_CMD.to_string(),
+        vec![
+            "--play-and-exit".to_string(),
+            "--no-qt-privacy".to_string(),
+            stream_url.to_string(),
+        ],
+    )
+}
+
+/// Returns (executable, args) to run VLC reading from stdin (for piped yt-dlp stream).
+pub async fn get_vlc_play_stdin_invocation() -> (String, Vec<String>) {
+    if check_command(VLC_CMD).await {
+        return (
+            VLC_CMD.to_string(),
+            vec![
+                "--play-and-exit".to_string(),
+                "--no-qt-privacy".to_string(),
+                "-".to_string(),
+            ],
+        );
+    }
+    #[cfg(target_os = "linux")]
+    if check_flatpak_vlc().await {
+        return (
+            "flatpak".to_string(),
+            vec![
+                "run".to_string(),
+                "org.videolan.VLC".to_string(),
+                "--play-and-exit".to_string(),
+                "--no-qt-privacy".to_string(),
+                "-".to_string(),
+            ],
+        );
+    }
+    (
+        VLC_CMD.to_string(),
+        vec![
+            "--play-and-exit".to_string(),
+            "--no-qt-privacy".to_string(),
+            "-".to_string(),
+        ],
+    )
+}
+
+pub async fn ensure_vlc() -> Result<()> {
+    if check_vlc().await {
+        println!("✓ VLC is installed");
+        return Ok(());
+    }
+
+    println!("VLC not found. Attempting to install...");
+
+    #[cfg(windows)]
+    {
+        if check_command("winget").await {
+            println!("Installing VLC via winget...");
+            let status = TokioCommand::new("winget")
+                .args(&[
+                    "install",
+                    "--id",
+                    "VideoLAN.VLC",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ])
+                .status()
+                .await;
+
+            if status.is_ok() && status.unwrap().success() {
+                println!("✓ VLC installed successfully via winget");
+                return Ok(());
+            }
+        }
+
+        if check_command("choco").await {
+            println!("Installing VLC via chocolatey...");
+            let status = TokioCommand::new("choco")
+                .args(&["install", "vlc", "-y"])
+                .status()
+                .await;
+
+            if status.is_ok() && status.unwrap().success() {
+                println!("✓ VLC installed successfully via chocolatey");
+                return Ok(());
+            }
+        }
+
+        if check_command("scoop").await {
+            println!("Installing VLC via scoop...");
+            let status = TokioCommand::new("scoop")
+                .args(&["install", "vlc"])
+                .status()
+                .await;
+
+            if status.is_ok() && status.unwrap().success() {
+                println!("✓ VLC installed successfully via scoop");
+                return Ok(());
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try dnf (Fedora/RHEL)
+        if check_command("dnf").await {
+            println!("Installing VLC via dnf...");
+            let status = TokioCommand::new("sudo")
+                .args(&["dnf", "install", "-y", "vlc"])
+                .status()
+                .await;
+
+            if status.is_ok() && status.unwrap().success() {
+                println!("✓ VLC installed successfully via dnf");
+                return Ok(());
+            }
+        }
+
+        if check_command("apt").await {
+            println!("Installing VLC via apt...");
+            let status = TokioCommand::new("sudo")
+                .args(&["apt", "install", "-y", "vlc"])
+                .status()
+                .await;
+
+            if status.is_ok() && status.unwrap().success() {
+                println!("✓ VLC installed successfully via apt");
+                return Ok(());
+            }
+        }
+
+        if check_command("pacman").await {
+            println!("Installing VLC via pacman...");
+            let status = TokioCommand::new("sudo")
+                .args(&["pacman", "-S", "--noconfirm", "vlc"])
+                .status()
+                .await;
+
+            if status.is_ok() && status.unwrap().success() {
+                println!("✓ VLC installed successfully via pacman");
+                return Ok(());
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if check_command("brew").await {
+            println!("Installing VLC via brew...");
+            let status = TokioCommand::new("brew")
+                .args(&["install", "--cask", "vlc"])
+                .status()
+                .await;
+
+            if status.is_ok() && status.unwrap().success() {
+                println!("✓ VLC installed successfully via brew");
+                return Ok(());
+            }
+        }
+    }
+
+    if check_vlc().await {
+        println!("✓ VLC is now available");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Failed to install VLC automatically. Please install it manually:\n\
+            Windows: winget install VideoLAN.VLC\n\
+            Linux: sudo dnf install vlc (Fedora) or sudo apt install vlc (Debian/Ubuntu) or sudo pacman -S vlc (Arch)\n\
+            macOS: brew install --cask vlc\n\
+            Or visit: https://www.videolan.org/vlc/"
         ))
     }
 }
@@ -920,6 +1161,7 @@ async fn check_command(cmd: &str) -> bool {
     TokioCommand::new(cmd).output().await.is_ok()
 }
 
+#[allow(dead_code)]
 pub async fn check_mpv() -> bool {
     #[cfg(windows)]
     {

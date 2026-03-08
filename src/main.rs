@@ -102,7 +102,7 @@ fn prompt_for_google_credentials_if_needed() {
 async fn main() -> Result<()> {
     println!("Checking dependencies...");
 
-    // Ensure mpv and yt-dlp are installed
+    // Ensure VLC and yt-dlp are installed
     if let Err(e) = deps::ensure_dependencies().await {
         eprintln!("Warning: {}", e);
         eprintln!("The application may not work correctly without these dependencies.");

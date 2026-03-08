@@ -3,16 +3,16 @@
 A terminal-based YouTube client built with Rust that allows you to:
 - Authenticate with Google OAuth2
 - View your subscription videos
-- Play videos using mpv and yt-dlp
+- Play videos using VLC and yt-dlp
 
 ## Prerequisites
 
 1. **Rust** - Install from [rustup.rs](https://rustup.rs/)
    - **Windows**: You'll also need a C compiler. Install [MSYS2](https://www.msys2.org/) or use the MSVC toolchain with Visual Studio Build Tools
-2. **mpv** - Video player
-   - Windows: Download from [mpv.io](https://mpv.io/installation/)
-   - Linux: `sudo apt install mpv` (Ubuntu/Debian) or `sudo pacman -S mpv` (Arch)
-   - macOS: `brew install mpv`
+2. **VLC** - Video player
+   - Windows: Download from [videolan.org](https://www.videolan.org/vlc/) or `winget install VideoLAN.VLC`
+   - Linux: `sudo dnf install vlc` (Fedora), `sudo apt install vlc` (Ubuntu/Debian), or `sudo pacman -S vlc` (Arch)
+   - macOS: `brew install --cask vlc`
 3. **yt-dlp** - YouTube downloader
    - Windows: Download from [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases) or use `pip install yt-dlp`
    - Linux: `sudo apt install yt-dlp` or `pip install yt-dlp`
@@ -165,7 +165,7 @@ Or run the binary directly:
 - `b` - Back (in video lists)
 - `q` - Quit
 
-**Video Playback**: Videos will open in mpv player. Make sure mpv is installed and in your PATH.
+**Video Playback**: Videos will open in VLC. Make sure VLC is installed (system package or Flatpak: `flatpak install flathub org.videolan.VLC`). The app detects both system VLC and Flatpak VLC on Linux.
 
 ### Watch History
 
@@ -189,9 +189,9 @@ The application tracks your watch history locally. When you play a video, it's a
 - ✅ **View Playlists** - Access all your YouTube playlists
 - ✅ **Browse Channels** - Enter any channel URL to view videos
 - ✅ **Terminal UI** - Beautiful TUI with ratatui
-- ✅ **Video Playback** - Play videos using mpv + yt-dlp with instant streaming
+- ✅ **Video Playback** - Play videos using VLC + yt-dlp with instant streaming
 - ✅ **Automatic Token Refresh** - Tokens refresh automatically
-- ✅ **Auto-install Dependencies** - mpv and yt-dlp download automatically
+- ✅ **Auto-install Dependencies** - VLC and yt-dlp can be installed automatically
 - ✅ **Multi-language Support** - English, German, Portuguese (Brazil), Spanish (Spain), French (France)
 
 ## Configuration
@@ -202,7 +202,7 @@ The app stores your authentication token in:
 
 ## Troubleshooting
 
-- **"mpv not found"**: Make sure mpv is installed and accessible from your PATH
+- **"VLC not found"**: Make sure VLC is installed and accessible from your PATH
 - **"yt-dlp not found"**: Install yt-dlp and ensure it's in your PATH
 - **Authentication errors**: Check your Google OAuth credentials and ensure YouTube Data API v3 is enabled
 - **No videos showing**: Make sure you have active subscriptions on YouTube
